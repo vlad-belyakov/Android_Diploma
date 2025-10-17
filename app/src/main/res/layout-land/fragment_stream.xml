@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black"
+    tools:context=".ui.stream.StreamFragment">
+
+    <!-- Buttons are at the bottom -->
+    <Button
+        android:id="@+id/watch_stream_button"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="8dp"
+        android:layout_marginBottom="8dp"
+        android:backgroundTint="@android:color/holo_blue_dark"
+        android:text="Смотреть"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <Button
+        android:id="@+id/start_stream_button"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="8dp"
+        android:backgroundTint="@android:color/holo_red_dark"
+        android:text="Начать трансляцию"
+        app:layout_constraintBottom_toBottomOf="@+id/watch_stream_button"
+        app:layout_constraintEnd_toStartOf="@id/watch_stream_button" />
+
+    <Button
+        android:id="@+id/send_chat_message_button"
+        android:layout_width="47dp"
+        android:layout_height="49dp"
+        android:layout_marginEnd="8dp"
+        android:backgroundTint="@color/black"
+        app:icon="@android:drawable/ic_menu_send"
+        app:iconTint="@color/white"
+        app:layout_constraintBottom_toBottomOf="@+id/start_stream_button"
+        app:layout_constraintEnd_toStartOf="@+id/start_stream_button" />
+
+    <EditText
+        android:id="@+id/chat_message_input"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:hint="Введите сообщение"
+        android:maxLines="3"
+        android:textColor="@android:color/white"
+        android:textColorHint="@android:color/darker_gray"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="8dp"
+        app:layout_constraintBottom_toBottomOf="@+id/send_chat_message_button"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@+id/send_chat_message_button" />
+
+    <!-- Container for Stream Views -->
+    <FrameLayout
+        android:id="@+id/stream_view_container"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_marginBottom="8dp"
+        android:background="@android:color/black"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toTopOf="@+id/watch_stream_button"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@+id/chat_scroll_view"
+        app:layout_constraintHorizontal_weight="2">
+
+        <SurfaceView
+            android:id="@+id/decoded_stream_view"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
+
+        <androidx.camera.view.PreviewView
+            android:id="@+id/camera_preview_view"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
+
+    </FrameLayout>
+
+    <!-- Chat history takes 1/3 of the space -->
+    <ScrollView
+        android:id="@+id/chat_scroll_view"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_marginStart="8dp"
+        android:layout_marginBottom="8dp"
+        app:layout_constraintBottom_toTopOf="@+id/watch_stream_button"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toEndOf="@+id/stream_view_container"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintHorizontal_weight="1">
+
+        <TextView
+            android:id="@+id/chat_log_textview"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="История чата:\n"
+            android:textColor="@android:color/white" />
+    </ScrollView>
+
+</androidx.constraintlayout.widget.ConstraintLayout>

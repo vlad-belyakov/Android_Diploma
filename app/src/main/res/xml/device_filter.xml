@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Replace 1234 and 5678 with the vendor and product ID of your USB device.
+        You can find these IDs by connecting your device to a computer and checking its properties.
+    -->
+    <usb-device vendor-id="1234" product-id="5678" />
+</resources>

@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">MultiMediaExchanger</string>
+    <string name="title_home">Home</string>
+    <string name="title_dashboard">Dashboard</string>
+    <string name="title_notifications">Notifications</string>
+    <string name="title_stream">Трансляция</string>
+    <string name="title_calls">Звонки</string>
+    <string name="title_files">Файлы</string>
+    <string name="title_messages">Сообщения</string>
+</resources>
