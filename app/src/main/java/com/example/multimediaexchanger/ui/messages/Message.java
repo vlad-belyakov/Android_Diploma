@@ -7,19 +7,22 @@ public class Message {
         TEXT_SENT, TEXT_RECEIVED, IMAGE_SENT, IMAGE_RECEIVED
     }
 
-    private final MessageType type;
+    // FIXED: Fields are not final to allow Gson to instantiate the class
+    private MessageType type;
     private String text;
-    private Uri imageUri;
-    private final long timestamp;
+    private transient Uri imageUri;
+    private String imageUriString;
+    private long timestamp;
 
-    // Constructor for text messages
+    // FIXED: Added a no-argument constructor for Gson
+    public Message() {}
+
     public Message(MessageType type, String text) {
         this.type = type;
         this.text = text;
         this.timestamp = System.currentTimeMillis();
     }
 
-    // Constructor for image messages
     public Message(MessageType type, Uri imageUri) {
         this.type = type;
         this.imageUri = imageUri;
@@ -40,5 +43,17 @@ public class Message {
 
     public long getTimestamp() {
         return timestamp;
+    }
+
+    public String getImageUriString() {
+        return imageUriString;
+    }
+
+    public void setImageUriString(String imageUriString) {
+        this.imageUriString = imageUriString;
+    }
+    
+    public void setImageUri(Uri imageUri) {
+        this.imageUri = imageUri;
     }
 }

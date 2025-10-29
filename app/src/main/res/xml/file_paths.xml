@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Path for files received/sent in FilesFragment -->
+    <external-files-path name="files" path="." />
+    <!-- Path for logs written in FilesFragment -->
+    <external-files-path name="logs" path="logs/" />
+    <!-- Path for images cached in MessagesFragment -->
+    <cache-path name="images" path="images/" />
+</paths>

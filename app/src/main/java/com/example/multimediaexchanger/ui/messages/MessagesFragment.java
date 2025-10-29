@@ -2,333 +2,325 @@ package com.example.multimediaexchanger.ui.messages;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
-import android.app.PendingIntent;
-import android.content.BroadcastReceiver;
-import android.content.Context;
+import android.content.ContentResolver;
 import android.content.Intent;
-import android.content.IntentFilter;
 import android.database.Cursor;
-import android.hardware.usb.UsbConstants;
-import android.hardware.usb.UsbDevice;
-import android.hardware.usb.UsbDeviceConnection;
-import android.hardware.usb.UsbEndpoint;
-import android.hardware.usb.UsbInterface;
-import android.hardware.usb.UsbManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
-import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.ImageButton;
+import android.widget.ProgressBar;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
-import androidx.core.content.ContextCompat;
-import androidx.core.content.FileProvider;
+import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
+import androidx.lifecycle.ViewModelProvider;
 import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
 
+import com.example.multimediaexchanger.R;
 import com.example.multimediaexchanger.databinding.FragmentMessagesBinding;
+import com.example.multimediaexchanger.ui.UdpViewModel;
+import com.example.multimediaexchanger.ui.UsbLogViewModel;
+import com.example.multimediaexchanger.ui.network.NetworkViewModel;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MessagesFragment extends Fragment {
 
     private FragmentMessagesBinding binding;
-    private UsbManager usbManager;
-    private UsbDeviceConnection connection;
-    private UsbEndpoint endpointIn, endpointOut;
-    private volatile boolean stopReading = false;
-    private Thread readingThread;
-    private ExecutorService messageExecutor;
-    private volatile boolean isDeviceConnected = false;
-
-    private final List<Message> messageList = new ArrayList<>();
+    private UdpViewModel udpViewModel;
+    private NetworkViewModel networkViewModel;
+    private UsbLogViewModel usbLogViewModel;
+    private MessagesViewModel messagesViewModel;
     private MessagesAdapter messagesAdapter;
 
-    private static final String ACTION_USB_PERMISSION = "com.android.example.USB_PERMISSION";
-    private static final String TAG = "MessagesFragment";
-    private static final byte COMMAND_MESSAGE_TEXT = 0x06;
-    private static final byte COMMAND_MESSAGE_IMAGE = 0x07;
+    private RecyclerView messagesRecyclerView;
+    private EditText messageInput;
+    private ProgressBar fileProgressBar;
 
-    private final ActivityResultLauncher<Intent> imagePickerLauncher = registerForActivityResult(
+    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+
+    private static final int CHUNK_SIZE = 16384; // 16KB
+
+    private final ActivityResultLauncher<Intent> filePickerLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
             result -> {
-                if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null && result.getData().getData() != null) {
-                    Uri imageUri = result.getData().getData();
-                    sendImage(imageUri);
-                }
-            });
-
-    private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
-        public void onReceive(Context context, Intent intent) {
-            String action = intent.getAction();
-            if (ACTION_USB_PERMISSION.equals(action)) {
-                synchronized (this) {
-                    UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false) && device != null) {
-                        setupCommunication(device);
+                if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
+                    Uri uri = result.getData().getData();
+                    if (uri != null) {
+                        sendFile(uri);
+                    } else {
+                        usbLogViewModel.log("File Picker: URI was null");
                     }
                 }
-            } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
-                closeConnection();
-            }
-        }
-    };
+            });
 
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
         binding = FragmentMessagesBinding.inflate(inflater, container, false);
-        messageExecutor = Executors.newCachedThreadPool();
-
-        setupRecyclerView();
-
-        usbManager = (UsbManager) requireActivity().getSystemService(Context.USB_SERVICE);
-        IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
-        filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
-        ContextCompat.registerReceiver(requireActivity(), usbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED);
-
-        setupClickListeners();
-        checkForConnectedDevice();
         return binding.getRoot();
     }
 
+    @Override
+    public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
+        super.onViewCreated(view, savedInstanceState);
+
+        messagesRecyclerView = view.findViewById(R.id.messagesRecyclerView);
+        Button sendButton = view.findViewById(R.id.sendButton);
+        ImageButton attachButton = view.findViewById(R.id.attachButton);
+        messageInput = view.findViewById(R.id.messageInput);
+        fileProgressBar = view.findViewById(R.id.fileProgressBar);
+
+        udpViewModel = new ViewModelProvider(requireActivity()).get(UdpViewModel.class);
+        networkViewModel = new ViewModelProvider(requireActivity()).get(NetworkViewModel.class);
+        usbLogViewModel = new ViewModelProvider(requireActivity()).get(UsbLogViewModel.class);
+        messagesViewModel = new ViewModelProvider(this).get(MessagesViewModel.class);
+
+        setupRecyclerView();
+        setupClickListeners(sendButton, attachButton);
+        observeUdpMessages();
+        observeChatHistory();
+    }
+
     private void setupRecyclerView() {
-        messagesAdapter = new MessagesAdapter(getContext(), messageList);
-        LinearLayoutManager layoutManager = new LinearLayoutManager(getContext());
-        layoutManager.setStackFromEnd(true);
-        binding.messagesRecyclerView.setLayoutManager(layoutManager);
-        binding.messagesRecyclerView.setAdapter(messagesAdapter);
+        messagesAdapter = new MessagesAdapter(getContext(), new ArrayList<>());
+        messagesRecyclerView.setLayoutManager(new LinearLayoutManager(getContext()));
+        messagesRecyclerView.setAdapter(messagesAdapter);
     }
 
-    private void setupClickListeners() {
-        binding.sendButton.setOnClickListener(v -> {
-            String text = binding.messageInput.getText().toString().trim();
-            if (!text.isEmpty() && isDeviceConnected) {
-                sendTextMessage(text);
-                binding.messageInput.setText("");
-            } else if (!isDeviceConnected) {
-                Toast.makeText(getContext(), "USB-устройство не подключено.", Toast.LENGTH_SHORT).show();
+    private void setupClickListeners(Button sendButton, ImageButton attachButton) {
+        sendButton.setOnClickListener(v -> sendMessage());
+        attachButton.setOnClickListener(v -> openFilePicker());
+    }
+
+    private void observeChatHistory() {
+        messagesViewModel.getMessages().observe(getViewLifecycleOwner(), messages -> {
+            messagesAdapter.updateMessages(messages);
+            if (messages != null && !messages.isEmpty()) {
+                messagesRecyclerView.scrollToPosition(messages.size() - 1);
             }
         });
+    }
 
-        binding.attachButton.setOnClickListener(v -> {
-            if (!isDeviceConnected) {
-                Toast.makeText(getContext(), "USB-устройство не подключено.", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+    private void sendMessage() {
+        String text = messageInput.getText().toString().trim();
+        if (text.isEmpty()) return;
+        String targetIp = networkViewModel.getTargetIpAddress().getValue();
+        if (targetIp == null || targetIp.isEmpty()) {
+            Toast.makeText(getContext(), "IP адрес получателя не указан", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        messagesViewModel.addMessage(new Message(Message.MessageType.TEXT_SENT, text));
+        udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_TEXT, text.getBytes(StandardCharsets.UTF_8));
+        messageInput.setText("");
+    }
+
+    private void openFilePicker() {
+        try {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
             intent.setType("image/*");
-            imagePickerLauncher.launch(intent);
-        });
+            filePickerLauncher.launch(intent);
+        } catch (Exception e) {
+            usbLogViewModel.log("ERROR: Failed to open file picker", e);
+        }
     }
 
-    private void sendTextMessage(String text) {
-        messageExecutor.execute(() -> {
-            if (!isDeviceConnected || endpointOut == null) return;
+    // --- TOTALLY REWRITTEN FILE HANDLING LOGIC ---
+
+    private void sendFile(Uri uri) {
+        String targetIp = networkViewModel.getTargetIpAddress().getValue();
+        if (targetIp == null || targetIp.isEmpty()) {
+            Toast.makeText(getContext(), "IP адрес получателя не указан", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        executor.execute(() -> {
             try {
-                byte[] textBytes = text.getBytes(StandardCharsets.UTF_8);
-                ByteBuffer buffer = ByteBuffer.allocate(1 + 4 + textBytes.length).order(ByteOrder.BIG_ENDIAN);
-                buffer.put(COMMAND_MESSAGE_TEXT).putInt(textBytes.length).put(textBytes);
-                connection.bulkTransfer(endpointOut, buffer.array(), buffer.position(), 5000);
+                // Step 1: Copy file to a stable location and get a stable URI
+                Uri stableUri = copyFileToInternalCache(uri);
+                if (stableUri == null) {
+                    requireActivity().runOnUiThread(() -> Toast.makeText(getContext(), "Не удалось обработать файл", Toast.LENGTH_SHORT).show());
+                    return;
+                }
 
+                File localFile = new File(stableUri.getPath());
+                long fileSize = localFile.length();
+                String fileName = localFile.getName();
+
+                usbLogViewModel.log("File Transfer: Starting to send file '" + fileName + "' (" + fileSize + " bytes) to " + targetIp);
+
+                // Step 2: Add message to UI with the STABLE URI
                 requireActivity().runOnUiThread(() -> {
-                    addMessage(new Message(Message.MessageType.TEXT_SENT, text));
+                    messagesViewModel.addMessage(new Message(Message.MessageType.IMAGE_SENT, stableUri));
                 });
 
+                // Step 3: Send header
+                ByteBuffer headerBuffer = ByteBuffer.allocate(Long.BYTES + fileName.length());
+                headerBuffer.putLong(fileSize);
+                headerBuffer.put(fileName.getBytes(StandardCharsets.UTF_8));
+                udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_FILE_HEADER, headerBuffer.array());
+
+                // Step 4: Send file content from the stable local copy
+                try (InputStream inputStream = new FileInputStream(localFile)) {
+                    byte[] buffer = new byte[CHUNK_SIZE];
+                    int bytesRead;
+                    long totalBytesSent = 0;
+                    while ((bytesRead = inputStream.read(buffer)) != -1) {
+                        byte[] chunk = new byte[bytesRead];
+                        System.arraycopy(buffer, 0, chunk, 0, bytesRead);
+                        udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_FILE_CHUNK, chunk);
+                        totalBytesSent += bytesRead;
+                        updateProgress(totalBytesSent, fileSize);
+                    }
+                }
+
+                udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_FILE_END, new byte[0]);
+                usbLogViewModel.log("File Transfer: Successfully sent file " + fileName);
+
             } catch (Exception e) {
-                Log.e(TAG, "Ошибка отправки текстового сообщения", e);
+                usbLogViewModel.log("ERROR: Failed to send file", e);
+                requireActivity().runOnUiThread(() -> Toast.makeText(getContext(), "Ошибка отправки файла", Toast.LENGTH_SHORT).show());
+            } finally {
+                requireActivity().runOnUiThread(() -> fileProgressBar.setVisibility(View.GONE));
             }
         });
     }
 
-    private void sendImage(Uri imageUri) {
-        messageExecutor.execute(() -> {
-            if (!isDeviceConnected || endpointOut == null) return;
-            try (InputStream inputStream = requireContext().getContentResolver().openInputStream(imageUri)) {
-                if (inputStream == null) return;
+    private Uri copyFileToInternalCache(Uri uri) {
+        try {
+            ContentResolver resolver = requireContext().getContentResolver();
+            String sourceFileName = getFileName(resolver, uri);
+            String uniqueFileName = System.currentTimeMillis() + "_" + (sourceFileName != null ? sourceFileName : "file");
+            
+            File destinationFile = new File(requireContext().getFilesDir(), uniqueFileName);
 
-                byte[] imageBytes = new byte[inputStream.available()];
-                inputStream.read(imageBytes);
+            try (InputStream inputStream = resolver.openInputStream(uri);
+                 FileOutputStream outputStream = new FileOutputStream(destinationFile)) {
 
-                ByteBuffer buffer = ByteBuffer.allocate(1 + 4 + imageBytes.length).order(ByteOrder.BIG_ENDIAN);
-                buffer.put(COMMAND_MESSAGE_IMAGE).putInt(imageBytes.length).put(imageBytes);
+                if (inputStream == null) {
+                    throw new IOException("Could not open input stream for " + uri);
+                }
 
-                connection.bulkTransfer(endpointOut, buffer.array(), buffer.limit(), 10000);
-
-                requireActivity().runOnUiThread(() -> {
-                    addMessage(new Message(Message.MessageType.IMAGE_SENT, imageUri));
-                });
-
-            } catch (Exception e) {
-                Log.e(TAG, "Ошибка отправки изображения", e);
-            }
-        });
-    }
-
-    private void startReading() {
-        stopReading = false;
-        readingThread = new Thread(() -> {
-            while (!stopReading) {
-                if (connection == null || endpointIn == null) break;
-                try {
-                    byte[] header = readExactly(5);
-                    if (header == null) break;
-
-                    ByteBuffer headerBuffer = ByteBuffer.wrap(header).order(ByteOrder.BIG_ENDIAN);
-                    byte command = headerBuffer.get();
-                    int length = headerBuffer.getInt();
-
-                    if (length <= 0 || length > 10 * 1024 * 1024) { // 10MB limit
-                        Log.w(TAG, "Неверная длина сообщения: " + length);
-                        continue;
-                    }
-
-                    byte[] data = readExactly(length);
-                    if (data == null) break;
-
-                    if (command == COMMAND_MESSAGE_TEXT) {
-                        String text = new String(data, StandardCharsets.UTF_8);
-                        requireActivity().runOnUiThread(() -> {
-                            addMessage(new Message(Message.MessageType.TEXT_RECEIVED, text));
-                        });
-                    } else if (command == COMMAND_MESSAGE_IMAGE) {
-                        File imageFile = saveImageToFile(data);
-                        if (imageFile != null) {
-                            Uri imageUri = FileProvider.getUriForFile(requireContext(), requireContext().getPackageName() + ".provider", imageFile);
-                            requireActivity().runOnUiThread(() -> {
-                                addMessage(new Message(Message.MessageType.IMAGE_RECEIVED, imageUri));
-                            });
-                        }
-                    }
-
-                } catch (IOException e) {
-                    if (!stopReading) Log.e(TAG, "Ошибка чтения", e);
-                    break;
+                byte[] buffer = new byte[4096];
+                int bytesRead;
+                while ((bytesRead = inputStream.read(buffer)) != -1) {
+                    outputStream.write(buffer, 0, bytesRead);
                 }
             }
-        });
-        readingThread.start();
-    }
-
-    private File saveImageToFile(byte[] imageData) {
-        try {
-            File imagesDir = new File(requireContext().getCacheDir(), "images");
-            if (!imagesDir.exists()) {
-                imagesDir.mkdirs();
-            }
-            String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
-            File imageFile = new File(imagesDir, "IMG_" + timeStamp + ".jpg");
-            try (FileOutputStream fos = new FileOutputStream(imageFile)) {
-                fos.write(imageData);
-            }
-            return imageFile;
-        } catch (IOException e) {
-            Log.e(TAG, "Не удалось сохранить изображение", e);
+            usbLogViewModel.log("File copied to internal cache: " + destinationFile.getAbsolutePath());
+            return Uri.fromFile(destinationFile);
+        } catch (Exception e) {
+            usbLogViewModel.log("ERROR: Failed to copy file to internal cache", e);
             return null;
         }
     }
 
-    private void addMessage(Message message) {
-        messageList.add(message);
-        messagesAdapter.notifyItemInserted(messageList.size() - 1);
-        binding.messagesRecyclerView.scrollToPosition(messageList.size() - 1);
-    }
-
-    private byte[] readExactly(int byteCount) throws IOException {
-        byte[] buffer = new byte[byteCount];
-        int offset = 0;
-        while (offset < byteCount) {
-            if (stopReading || connection == null) return null;
-            int bytesRead = connection.bulkTransfer(endpointIn, buffer, offset, byteCount - offset, 10000);
-            if (bytesRead > 0) {
-                offset += bytesRead;
-            } else {
-                throw new IOException("USB read failed.");
+    private String getFileName(ContentResolver resolver, Uri uri) {
+        try (Cursor cursor = resolver.query(uri, null, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                @SuppressLint("Range")
+                String name = cursor.getString(cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME));
+                if (name != null) return name;
             }
         }
-        return buffer;
+        return null;
     }
 
-    // --- USB & LIFECYCLE LOGIC ---
-    private void checkForConnectedDevice() {
-        HashMap<String, UsbDevice> deviceList = usbManager.getDeviceList();
-        if (deviceList.isEmpty()) return;
-        for (UsbDevice device : deviceList.values()) {
-            PendingIntent pi = PendingIntent.getBroadcast(getContext(), 0, new Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
-            usbManager.requestPermission(device, pi);
-            break;
-        }
-    }
+    private void observeUdpMessages() {
+        final FileOutputStream[] fileOutputStream = {null};
+        final File[] tempFile = {null};
 
-    private void setupCommunication(UsbDevice device) {
-        connection = usbManager.openDevice(device);
-        if (connection == null) return;
-        UsbInterface usbInterface = device.getInterface(0);
-        if (!connection.claimInterface(usbInterface, true)) {
-            connection.close();
-            return;
-        }
-        for (int j = 0; j < usbInterface.getEndpointCount(); j++) {
-            UsbEndpoint endpoint = usbInterface.getEndpoint(j);
-            if (endpoint.getType() == UsbConstants.USB_ENDPOINT_XFER_BULK) {
-                if (endpoint.getDirection() == UsbConstants.USB_DIR_IN) endpointIn = endpoint;
-                if (endpoint.getDirection() == UsbConstants.USB_DIR_OUT) endpointOut = endpoint;
+        udpViewModel.getReceivedMessage().observe(getViewLifecycleOwner(), message -> {
+            if (message == null) return;
+
+            switch (message.type) {
+                case UdpViewModel.MESSAGE_TYPE_TEXT:
+                    String text = new String(message.payload, StandardCharsets.UTF_8);
+                    messagesViewModel.addMessage(new Message(Message.MessageType.TEXT_RECEIVED, text));
+                    break;
+
+                case UdpViewModel.MESSAGE_TYPE_FILE_HEADER:
+                    try {
+                        ByteBuffer buffer = ByteBuffer.wrap(message.payload);
+                        long fileSize = buffer.getLong();
+                        String fileName = new String(buffer.array(), buffer.position(), buffer.remaining(), StandardCharsets.UTF_8);
+
+                        tempFile[0] = new File(requireContext().getCacheDir(), fileName);
+                        fileOutputStream[0] = new FileOutputStream(tempFile[0]);
+                        usbLogViewModel.log("File Transfer: Receiving file '" + fileName + "' (" + fileSize + " bytes) from " + message.senderIp);
+                        requireActivity().runOnUiThread(() -> fileProgressBar.setVisibility(View.VISIBLE));
+                    } catch (Exception e) {
+                        usbLogViewModel.log("ERROR: Processing file header failed", e);
+                    }
+                    break;
+
+                case UdpViewModel.MESSAGE_TYPE_FILE_CHUNK:
+                    try {
+                        if (fileOutputStream[0] != null) {
+                            fileOutputStream[0].write(message.payload);
+                        }
+                    } catch (IOException e) {
+                        usbLogViewModel.log("ERROR: Writing file chunk failed", e);
+                    }
+                    break;
+
+                case UdpViewModel.MESSAGE_TYPE_FILE_END:
+                    try {
+                        if (fileOutputStream[0] != null) {
+                            fileOutputStream[0].close();
+                            fileOutputStream[0] = null;
+
+                            if (tempFile[0] != null) {
+                                usbLogViewModel.log("File Transfer: Successfully received file " + tempFile[0].getName());
+                                messagesViewModel.addMessage(new Message(Message.MessageType.IMAGE_RECEIVED, Uri.fromFile(tempFile[0])));
+                                tempFile[0] = null;
+                            }
+                        }
+                    } catch (IOException e) {
+                        usbLogViewModel.log("ERROR: Closing file stream failed", e);
+                    } finally {
+                        requireActivity().runOnUiThread(() -> fileProgressBar.setVisibility(View.GONE));
+                    }
+                    break;
             }
-        }
-        if (endpointIn != null && endpointOut != null) {
-            isDeviceConnected = true;
-            if (getContext() != null) Toast.makeText(getContext(), "USB-устройство подключено.", Toast.LENGTH_SHORT).show();
-            startReading();
-        } else {
-            closeConnection();
-        }
+        });
     }
 
-    private void closeConnection() {
-        isDeviceConnected = false;
-        stopReading = true;
-        if (readingThread != null) {
-            try {
-                readingThread.join(500);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+    private void updateProgress(long sent, long total) {
+        requireActivity().runOnUiThread(() -> {
+            fileProgressBar.setMax((int) total);
+            fileProgressBar.setProgress((int) sent);
+            if(fileProgressBar.getVisibility() == View.GONE) {
+                fileProgressBar.setVisibility(View.VISIBLE);
             }
-            readingThread = null;
-        }
-        if (connection != null) {
-            connection.close();
-            connection = null;
-        }
-        if (getContext() != null) Toast.makeText(getContext(), "USB-устройство отключено.", Toast.LENGTH_SHORT).show();
+        });
     }
 
     @Override
     public void onDestroyView() {
         super.onDestroyView();
-        closeConnection();
-        if (messageExecutor != null) messageExecutor.shutdown();
-        try {
-            requireActivity().unregisterReceiver(usbReceiver);
-        } catch (Exception e) {
-            Log.w(TAG, "Unregister receiver failed", e);
+        if (executor != null && !executor.isShutdown()) {
+            executor.shutdown();
         }
         binding = null;
     }

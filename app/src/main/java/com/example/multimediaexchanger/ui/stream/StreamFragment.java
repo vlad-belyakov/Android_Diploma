@@ -2,18 +2,7 @@ package com.example.multimediaexchanger.ui.stream;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
-import android.app.PendingIntent;
-import android.content.BroadcastReceiver;
-import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.pm.PackageManager;
-import android.hardware.usb.UsbConstants;
-import android.hardware.usb.UsbDevice;
-import android.hardware.usb.UsbDeviceConnection;
-import android.hardware.usb.UsbEndpoint;
-import android.hardware.usb.UsbInterface;
-import android.hardware.usb.UsbManager;
 import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
@@ -23,11 +12,9 @@ import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.media.MediaRecorder;
 import android.os.Bundle;
-import android.text.method.ScrollingMovementMethod;
-import android.util.Log;
-import android.util.Size;
 import android.view.LayoutInflater;
 import android.view.Surface;
+import android.view.SurfaceHolder;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Toast;
@@ -36,52 +23,44 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.camera.core.CameraSelector;
-import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.core.content.ContextCompat;
 import androidx.fragment.app.Fragment;
+import androidx.lifecycle.ViewModelProvider;
 
 import com.example.multimediaexchanger.databinding.FragmentStreamBinding;
+import com.example.multimediaexchanger.ui.UdpViewModel;
+import com.example.multimediaexchanger.ui.UsbLogViewModel;
+import com.example.multimediaexchanger.ui.network.NetworkViewModel;
 import com.google.common.util.concurrent.ListenableFuture;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class StreamFragment extends Fragment {
+public class StreamFragment extends Fragment implements SurfaceHolder.Callback {
 
     private FragmentStreamBinding binding;
-    private UsbManager usbManager;
-    private UsbDeviceConnection connection;
-    private UsbEndpoint endpointIn, endpointOut;
-    private static final String ACTION_USB_PERMISSION = "com.android.example.USB_PERMISSION";
-    private static final String TAG = "StreamFragment";
+    private UdpViewModel udpViewModel;
+    private NetworkViewModel networkViewModel;
+    private UsbLogViewModel usbLogViewModel;
 
-    private volatile boolean isDeviceConnected = false;
     private volatile boolean isStreaming = false;
-    private volatile boolean stopReading = false;
-    private Thread readingThread;
+    private volatile boolean isWatching = false;
 
-    private static final byte COMMAND_STREAM = 0x02;
-    private static final byte COMMAND_CHAT = 0x03;
     private static final byte PACKET_TYPE_VIDEO = 0x10;
     private static final byte PACKET_TYPE_AUDIO = 0x20;
 
-    // --- Components ---
     private ListenableFuture<ProcessCameraProvider> cameraProviderFuture;
-    private ExecutorService cameraExecutor, streamingExecutor;
+    private ExecutorService streamingExecutor;
     private MediaCodec videoEncoder, audioEncoder, videoDecoder, audioDecoder;
     private AudioRecord audioRecord;
     private AudioTrack audioTrack;
     private Surface decodingSurface;
 
-    // --- Configs ---
-    private static final int VIDEO_WIDTH = 1280, VIDEO_HEIGHT = 720, VIDEO_BITRATE = 2000000, VIDEO_FRAME_RATE = 30;
+    private static final int VIDEO_WIDTH = 640, VIDEO_HEIGHT = 480, VIDEO_BITRATE = 1000000, VIDEO_FRAME_RATE = 20;
     private static final int AUDIO_SAMPLE_RATE = 44100, AUDIO_BITRATE = 64000, AUDIO_CHANNEL_COUNT = 1;
 
     private final ActivityResultLauncher<String[]> requestPermissionsLauncher =
@@ -91,40 +70,21 @@ public class StreamFragment extends Fragment {
                 }
             });
 
-    private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
-        public void onReceive(Context context, Intent intent) {
-            String action = intent.getAction();
-            if (ACTION_USB_PERMISSION.equals(action)) {
-                synchronized (this) {
-                    UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false) && device != null) {
-                        setupCommunication(device);
-                    }
-                }
-            } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
-                closeConnection();
-            }
-        }
-    };
-
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
         binding = FragmentStreamBinding.inflate(inflater, container, false);
 
-        cameraExecutor = Executors.newSingleThreadExecutor();
         streamingExecutor = Executors.newCachedThreadPool();
 
-        usbManager = (UsbManager) requireActivity().getSystemService(Context.USB_SERVICE);
-        IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
-        filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
-        ContextCompat.registerReceiver(requireActivity(), usbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED);
+        udpViewModel = new ViewModelProvider(requireActivity()).get(UdpViewModel.class);
+        networkViewModel = new ViewModelProvider(requireActivity()).get(NetworkViewModel.class);
+        usbLogViewModel = new ViewModelProvider(requireActivity()).get(UsbLogViewModel.class);
 
-        binding.chatLogTextview.setMovementMethod(new ScrollingMovementMethod());
-        decodingSurface = binding.decodedStreamView.getHolder().getSurface();
+        binding.decodedStreamView.getHolder().addCallback(this);
 
         setupClickListeners();
         checkPermissions();
-        checkForConnectedDevice();
+        observeIncomingData();
 
         return binding.getRoot();
     }
@@ -132,79 +92,58 @@ public class StreamFragment extends Fragment {
     private void setupClickListeners() {
         binding.startStreamButton.setOnClickListener(v -> {
             if (isStreaming) {
-                stopVideoStream();
+                stopStream();
             } else {
-                if (!isDeviceConnected) {
-                    Toast.makeText(getContext(), "USB-устройство не подключено.", Toast.LENGTH_SHORT).show();
+                String targetIp = networkViewModel.getTargetIpAddress().getValue();
+                if (targetIp == null || targetIp.isEmpty()) {
+                    usbLogViewModel.log("UI: Start stream failed. Target IP is not set.");
+                    Toast.makeText(getContext(), "IP адрес получателя не указан", Toast.LENGTH_SHORT).show();
                     return;
                 }
-                startVideoStream();
+                startStream();
             }
         });
 
         binding.watchStreamButton.setOnClickListener(v -> {
-            if (!isDeviceConnected) {
-                Toast.makeText(getContext(), "USB-устройство не подключено.", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            requireActivity().runOnUiThread(() -> {
-                binding.decodedStreamView.setVisibility(View.VISIBLE);
-                binding.cameraPreviewView.setVisibility(View.GONE);
-                Toast.makeText(getContext(), "Ожидание трансляции...", Toast.LENGTH_SHORT).show();
-            });
-        });
-
-        binding.sendChatMessageButton.setOnClickListener(v -> {
-            String message = binding.chatMessageInput.getText().toString();
-            if (!message.isEmpty() && isDeviceConnected) {
-                sendChatMessage(message);
-                binding.chatMessageInput.setText("");
-                binding.chatLogTextview.append("Я: " + message + "\n");
+            if (isWatching) {
+                stopWatching();
+            } else {
+                startWatching();
             }
         });
     }
 
-    private void checkPermissions(){
-         if (ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+    private void checkPermissions() {
+        if (ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissionsLauncher.launch(new String[]{Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO});
         }
     }
 
-    // --- SENDER LOGIC ---
-
     @SuppressLint("MissingPermission")
-    private void startVideoStream() {
+    private void startStream() {
         isStreaming = true;
+        usbLogViewModel.log("Stream: Starting stream...");
         requireActivity().runOnUiThread(() -> {
-             binding.startStreamButton.setText("Остановить трансляцию");
-             binding.cameraPreviewView.setVisibility(View.VISIBLE);
-             binding.decodedStreamView.setVisibility(View.GONE);
+            binding.startStreamButton.setText("Остановить трансляцию");
+            binding.cameraPreviewView.setVisibility(View.VISIBLE);
+            binding.decodedStreamView.setVisibility(View.GONE);
         });
 
         streamingExecutor.execute(() -> {
             try {
-                connection.bulkTransfer(endpointOut, new byte[]{COMMAND_STREAM}, 1, 5000);
-                ByteBuffer configBuffer = ByteBuffer.allocate(20).order(ByteOrder.BIG_ENDIAN)
-                        .putInt(VIDEO_WIDTH).putInt(VIDEO_HEIGHT).putInt(VIDEO_BITRATE)
-                        .putInt(AUDIO_SAMPLE_RATE).putInt(AUDIO_CHANNEL_COUNT);
-                connection.bulkTransfer(endpointOut, configBuffer.array(), 20, 5000);
-
-                setupAudioEncoder();
                 setupVideoEncoder();
-
+                setupAudioEncoder();
                 streamingExecutor.execute(this::streamAudio);
-
-                requireActivity().runOnUiThread(this::startCameraAndAnalysis);
-
+                requireActivity().runOnUiThread(this::startCameraStream);
             } catch (Exception e) {
-                Log.e(TAG, "Streaming setup failed", e);
-                if (getActivity() != null) getActivity().runOnUiThread(this::stopVideoStream);
+                usbLogViewModel.log("ERROR: Stream setup failed", e);
+                if (getActivity() != null) getActivity().runOnUiThread(this::stopStream);
             }
         });
     }
 
-    private void startCameraAndAnalysis() {
+    private void startCameraStream() {
         cameraProviderFuture = ProcessCameraProvider.getInstance(requireContext());
         cameraProviderFuture.addListener(() -> {
             try {
@@ -212,47 +151,39 @@ public class StreamFragment extends Fragment {
                 Preview preview = new Preview.Builder().build();
                 preview.setSurfaceProvider(binding.cameraPreviewView.getSurfaceProvider());
 
-                ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
-                        .setTargetResolution(new Size(VIDEO_WIDTH, VIDEO_HEIGHT))
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .build();
-
-                imageAnalysis.setAnalyzer(cameraExecutor, image -> {
-                    if (isStreaming && videoEncoder != null) {
-                        int bufferIndex = videoEncoder.dequeueInputBuffer(-1);
-                        if (bufferIndex >= 0) {
-                            ByteBuffer inputBuffer = videoEncoder.getInputBuffer(bufferIndex);
-                            if (inputBuffer != null) {
-                                inputBuffer.clear();
-                                inputBuffer.put(image.getPlanes()[0].getBuffer());
-                                inputBuffer.put(image.getPlanes()[2].getBuffer());
-                                videoEncoder.queueInputBuffer(bufferIndex, 0, inputBuffer.position(), System.nanoTime() / 1000, 0);
-                            }
-                        }
-                    }
-                    image.close();
-                });
+                if (videoEncoder != null) {
+                    preview.setSurfaceProvider(ContextCompat.getMainExecutor(requireContext()), surfaceRequest -> {
+                        Surface surface = videoEncoder.createInputSurface();
+                        surfaceRequest.provideSurface(surface, ContextCompat.getMainExecutor(requireContext()), result -> {});
+                    });
+                }
 
                 cameraProvider.unbindAll();
-                cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageAnalysis);
-                Log.d(TAG, "Трансляция началась.");
+                cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview);
+
             } catch (Exception e) {
-                Log.e(TAG, "Failed to bind camera for streaming", e);
-                stopVideoStream();
+                usbLogViewModel.log("ERROR: Failed to bind camera for streaming", e);
+                stopStream();
             }
         }, ContextCompat.getMainExecutor(requireContext()));
     }
 
-    private void stopVideoStream() {
+    private void stopStream() {
         if (!isStreaming) return;
         isStreaming = false;
 
         try {
-             if (cameraProviderFuture != null) cameraProviderFuture.get().unbindAll();
-             if (videoEncoder != null) { videoEncoder.stop(); videoEncoder.release(); videoEncoder = null; }
-             if (audioEncoder != null) { audioEncoder.stop(); audioEncoder.release(); audioEncoder = null; }
-        } catch (Exception e) {
-            Log.e(TAG, "Error stopping encoders/camera", e);
+            if (cameraProviderFuture != null && cameraProviderFuture.get() != null) cameraProviderFuture.get().unbindAll();
+        } catch (Exception e) { usbLogViewModel.log("WARN: Error unbinding camera", e); }
+        try { if (videoEncoder != null) { videoEncoder.stop(); videoEncoder.release(); videoEncoder = null; } } catch (Exception e) { usbLogViewModel.log("WARN: Video encoder cleanup failed", e); }
+        try { if (audioEncoder != null) { audioEncoder.stop(); audioEncoder.release(); audioEncoder = null; } } catch (Exception e) { usbLogViewModel.log("WARN: Audio encoder cleanup failed", e); }
+
+        if (audioRecord != null) {
+            try {
+                if (audioRecord.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) audioRecord.stop();
+                audioRecord.release();
+            } catch (Exception e) { usbLogViewModel.log("WARN: AudioRecord cleanup failed", e); }
+            audioRecord = null;
         }
 
         if (getActivity() != null) {
@@ -261,21 +192,7 @@ public class StreamFragment extends Fragment {
                 binding.cameraPreviewView.setVisibility(View.GONE);
             });
         }
-        Log.d(TAG, "Трансляция остановлена.");
-    }
-
-    private void sendChatMessage(String message) {
-        streamingExecutor.execute(() -> {
-            if (!isDeviceConnected || endpointOut == null) return;
-            try {
-                byte[] messageBytes = message.getBytes(StandardCharsets.UTF_8);
-                ByteBuffer buffer = ByteBuffer.allocate(1 + 4 + messageBytes.length).order(ByteOrder.BIG_ENDIAN);
-                buffer.put(COMMAND_CHAT).putInt(messageBytes.length).put(messageBytes);
-                connection.bulkTransfer(endpointOut, buffer.array(), buffer.position(), 5000);
-            } catch (Exception e) {
-                Log.e(TAG, "Send chat message failed", e);
-            }
-        });
+        usbLogViewModel.log("Stream: Streaming stopped.");
     }
 
     @SuppressLint("MissingPermission")
@@ -286,29 +203,27 @@ public class StreamFragment extends Fragment {
 
         while (isStreaming) {
             if (audioEncoder == null) break;
-            int inputBufferIndex = audioEncoder.dequeueInputBuffer(-1);
-            if (inputBufferIndex >= 0) {
-                ByteBuffer inputBuffer = audioEncoder.getInputBuffer(inputBufferIndex);
-                if (inputBuffer != null) {
-                    inputBuffer.clear();
-                    int length = audioRecord.read(inputBuffer, bufferSize);
-                    if (length > 0) {
-                        audioEncoder.queueInputBuffer(inputBufferIndex, 0, length, System.nanoTime() / 1000, 0);
+            try {
+                int inputBufferIndex = audioEncoder.dequeueInputBuffer(-1);
+                if (inputBufferIndex >= 0) {
+                    ByteBuffer inputBuffer = audioEncoder.getInputBuffer(inputBufferIndex);
+                    if (inputBuffer != null) {
+                        inputBuffer.clear();
+                        int length = audioRecord.read(inputBuffer, bufferSize);
+                        if (length > 0) {
+                            audioEncoder.queueInputBuffer(inputBufferIndex, 0, length, System.nanoTime() / 1000, 0);
+                        }
                     }
                 }
+            } catch (Exception e) {
+                usbLogViewModel.log("WARN: Audio streaming read/queue failed", e);
             }
-        }
-
-        if (audioRecord != null) {
-            if (audioRecord.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) audioRecord.stop();
-            audioRecord.release();
-            audioRecord = null;
         }
     }
 
     private void setupVideoEncoder() throws IOException {
         MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, VIDEO_WIDTH, VIDEO_HEIGHT);
-        format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar);
+        format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
         format.setInteger(MediaFormat.KEY_BIT_RATE, VIDEO_BITRATE);
         format.setInteger(MediaFormat.KEY_FRAME_RATE, VIDEO_FRAME_RATE);
         format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
@@ -336,255 +251,192 @@ public class StreamFragment extends Fragment {
 
         @Override
         public void onOutputBufferAvailable(@NonNull MediaCodec codec, int index, @NonNull MediaCodec.BufferInfo info) {
-            if (!isStreaming || connection == null || endpointOut == null) return;
-            ByteBuffer outputBuffer = codec.getOutputBuffer(index);
-            if (outputBuffer != null && info.size > 0 && info.presentationTimeUs > 0) {
-                byte[] data = new byte[info.size];
-                outputBuffer.get(data);
-                ByteBuffer header = ByteBuffer.allocate(5).order(ByteOrder.BIG_ENDIAN).put(packetType).putInt(info.size);
-                connection.bulkTransfer(endpointOut, header.array(), 5, 5000);
-                connection.bulkTransfer(endpointOut, data, info.size, 5000);
+            if (!isStreaming) return;
+            String targetIp = networkViewModel.getTargetIpAddress().getValue();
+            if (targetIp == null || targetIp.isEmpty()) return;
+
+            try {
+                ByteBuffer outputBuffer = codec.getOutputBuffer(index);
+                if (outputBuffer != null && info.size > 0) {
+                    byte[] data = new byte[info.size];
+                    outputBuffer.get(data);
+
+                    byte[] payload = new byte[1 + data.length];
+                    payload[0] = packetType;
+                    System.arraycopy(data, 0, payload, 1, data.length);
+
+                    udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_STREAM, payload);
+                }
+                codec.releaseOutputBuffer(index, false);
+            } catch (Exception e) {
+                usbLogViewModel.log("ERROR: Stream encoder output buffer failed", e);
             }
-            codec.releaseOutputBuffer(index, false);
         }
+
         @Override public void onInputBufferAvailable(@NonNull MediaCodec codec, int index) {}
-        @Override public void onError(@NonNull MediaCodec codec, @NonNull MediaCodec.CodecException e) { Log.e(TAG, "MediaCodec Error", e); }
+        @Override public void onError(@NonNull MediaCodec codec, @NonNull MediaCodec.CodecException e) { usbLogViewModel.log("ERROR: Stream Encoder error", e); }
         @Override public void onOutputFormatChanged(@NonNull MediaCodec codec, @NonNull MediaFormat format) {}
     }
 
-    // --- RECIPIENT LOGIC ---
+    private void startWatching() {
+        if (isWatching) return;
+        isWatching = true;
+        usbLogViewModel.log("Stream: Starting to watch...");
+        if(getActivity() != null) {
+            getActivity().runOnUiThread(() -> {
+                binding.watchStreamButton.setText("Остановить просмотр");
+                binding.decodedStreamView.setVisibility(View.VISIBLE);
+                binding.cameraPreviewView.setVisibility(View.GONE);
+                Toast.makeText(getContext(), "Ожидание трансляции...", Toast.LENGTH_SHORT).show();
+            });
+        }
 
-    private void startReading() {
-        stopReading = false;
-        readingThread = new Thread(() -> {
-            while (!stopReading) {
-                if (connection == null || endpointIn == null) break;
-                try {
-                    byte[] commandBytes = readExactly(1);
-                    if (commandBytes == null) break;
-                    byte command = commandBytes[0];
-
-                    if (command == COMMAND_STREAM) handleStreamCommand();
-                    else if (command == COMMAND_CHAT) handleChatCommand();
-
-                } catch (IOException e) {
-                    if (!stopReading) Log.e(TAG, "Protocol error", e);
-                    break;
-                }
+        if (decodingSurface != null) {
+            try {
+                setupDecoders();
+            } catch (Exception e) {
+                usbLogViewModel.log("ERROR: Failed to setup decoders on watch start", e);
+                stopWatching();
             }
-        });
-        readingThread.start();
-    }
-
-    private void handleChatCommand() throws IOException {
-        byte[] lengthBytes = readExactly(4);
-        if (lengthBytes == null) throw new IOException("Stream ended");
-        int length = ByteBuffer.wrap(lengthBytes).order(ByteOrder.BIG_ENDIAN).getInt();
-        if (length <= 0 || length > 4096) throw new IOException("Invalid chat length");
-
-        byte[] messageBytes = readExactly(length);
-        if (messageBytes == null) throw new IOException("Stream ended");
-        final String message = new String(messageBytes, StandardCharsets.UTF_8);
-
-        if (getActivity() != null) {
-            getActivity().runOnUiThread(() -> binding.chatLogTextview.append("Собеседник: " + message + "\n"));
         }
     }
 
-    private void handleStreamCommand() throws IOException {
-        byte[] configBytes = readExactly(20);
-        if (configBytes == null) throw new IOException("Stream ended");
-
-        ByteBuffer cfg = ByteBuffer.wrap(configBytes).order(ByteOrder.BIG_ENDIAN);
-        final int vW = cfg.getInt(), vH = cfg.getInt(), vB = cfg.getInt();
-        final int aSr = cfg.getInt(), aCc = cfg.getInt();
-
-        requireActivity().runOnUiThread(() -> {
-            try {
-                binding.decodedStreamView.setVisibility(View.VISIBLE);
-                binding.cameraPreviewView.setVisibility(View.GONE);
-                setupDecoders(vW, vH, aSr, aCc);
-                Toast.makeText(getContext(), "Трансляция началась!", Toast.LENGTH_SHORT).show();
-            } catch (IOException e) {
-                Log.e(TAG, "Failed to setup decoders", e);
-            }
-        });
-
-        receiveStream();
+    private void stopWatching() {
+        if (!isWatching) return;
+        isWatching = false;
+        cleanupDecoders();
+        
+        if(getActivity() != null) {
+            getActivity().runOnUiThread(() -> {
+                binding.watchStreamButton.setText("Смотреть трансляцию");
+                binding.decodedStreamView.setVisibility(View.GONE);
+            });
+        }
+        usbLogViewModel.log("Stream: Watching stopped.");
+    }
+    
+    private void cleanupDecoders() {
+        try { if (videoDecoder != null) { videoDecoder.stop(); videoDecoder.release(); videoDecoder = null; } } catch (Exception e) { usbLogViewModel.log("WARN: Video decoder cleanup failed", e); }
+        try { if (audioDecoder != null) { audioDecoder.stop(); audioDecoder.release(); audioDecoder = null; } } catch (Exception e) { usbLogViewModel.log("WARN: Audio decoder cleanup failed", e); }
+        try { if (audioTrack != null) { audioTrack.stop(); audioTrack.release(); audioTrack = null; } } catch (Exception e) { usbLogViewModel.log("WARN: Audio track cleanup failed", e); }
     }
 
-    private void setupDecoders(int vW, int vH, int aSr, int aCc) throws IOException {
-        MediaFormat vFmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, vW, vH);
-        videoDecoder = MediaCodec.createDecoderByType(vFmt.getString(MediaFormat.KEY_MIME));
-        videoDecoder.configure(vFmt, decodingSurface, null, 0);
-        videoDecoder.start();
+    private void observeIncomingData() {
+        udpViewModel.getReceivedMessage().observe(getViewLifecycleOwner(), message -> {
+            if (message == null || !isWatching || message.type != UdpViewModel.MESSAGE_TYPE_STREAM) return;
 
-        int aChanCfg = (aCc == 1) ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
-        MediaFormat aFmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, aSr, aCc);
-        audioDecoder = MediaCodec.createDecoderByType(aFmt.getString(MediaFormat.KEY_MIME));
-        audioDecoder.configure(aFmt, null, null, 0);
-        audioDecoder.start();
-
-        int minBufSize = AudioTrack.getMinBufferSize(aSr, aChanCfg, AudioFormat.ENCODING_PCM_16BIT);
-        audioTrack = new AudioTrack.Builder()
-                .setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
-                .setAudioFormat(new AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(aSr).setChannelMask(aChanCfg).build())
-                .setBufferSizeInBytes(minBufSize).build();
-        audioTrack.play();
-    }
-
-    private void receiveStream() {
-        MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
-        while (!stopReading) {
             try {
-                byte[] typeBytes = readExactly(1);
-                if (typeBytes == null) break;
-                byte packetType = typeBytes[0];
+                ByteBuffer payload = ByteBuffer.wrap(message.payload);
+                if (payload.remaining() < 1) return;
+                byte streamType = payload.get();
+                byte[] data = new byte[payload.remaining()];
+                payload.get(data);
 
-                byte[] lengthBytes = readExactly(4);
-                if (lengthBytes == null) break;
-                int dataLength = ByteBuffer.wrap(lengthBytes).order(ByteOrder.BIG_ENDIAN).getInt();
-
-                if (dataLength <= 0 || dataLength > 1_000_000) continue;
-                byte[] data = readExactly(dataLength);
-                if (data == null) break;
-
-                MediaCodec decoder = (packetType == PACKET_TYPE_VIDEO) ? videoDecoder : audioDecoder;
-                if(decoder == null) continue;
+                MediaCodec decoder = (streamType == PACKET_TYPE_VIDEO) ? videoDecoder : audioDecoder;
+                if (decoder == null) return;
 
                 int inIdx = decoder.dequeueInputBuffer(10000);
                 if (inIdx >= 0) {
                     ByteBuffer inBuf = decoder.getInputBuffer(inIdx);
                     if (inBuf != null) {
                         inBuf.clear();
-                        inBuf.put(data, 0, dataLength);
-                        decoder.queueInputBuffer(inIdx, 0, dataLength, System.nanoTime() / 1000, 0);
+                        inBuf.put(data);
+                        decoder.queueInputBuffer(inIdx, 0, data.length, System.nanoTime() / 1000, 0);
                     }
                 }
-                processDecoderOutput(decoder, bufferInfo, packetType == PACKET_TYPE_AUDIO);
             } catch (Exception e) {
-                if (!stopReading) Log.e(TAG, "Error reading stream", e);
-                break;
+                usbLogViewModel.log("WARN: Incoming stream data processing failed", e);
+            }
+        });
+    }
+
+    private void setupDecoders() throws IOException {
+        if (decodingSurface == null) {
+            throw new IOException("Decoding surface is not available.");
+        }
+
+        usbLogViewModel.log("Stream: Setting up decoders...");
+        MediaFormat vFmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, VIDEO_WIDTH, VIDEO_HEIGHT);
+        videoDecoder = MediaCodec.createDecoderByType(vFmt.getString(MediaFormat.KEY_MIME));
+        videoDecoder.setCallback(new DecoderCallback(false));
+        videoDecoder.configure(vFmt, decodingSurface, null, 0);
+        videoDecoder.start();
+
+        int aChanCfg = (AUDIO_CHANNEL_COUNT == 1) ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
+        MediaFormat aFmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_COUNT);
+        audioDecoder = MediaCodec.createDecoderByType(aFmt.getString(MediaFormat.KEY_MIME));
+        audioDecoder.setCallback(new DecoderCallback(true));
+        audioDecoder.configure(aFmt, null, null, 0);
+        audioDecoder.start();
+
+        int minBufSize = AudioTrack.getMinBufferSize(AUDIO_SAMPLE_RATE, aChanCfg, AudioFormat.ENCODING_PCM_16BIT);
+        audioTrack = new AudioTrack.Builder()
+                .setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+                .setAudioFormat(new AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(AUDIO_SAMPLE_RATE).setChannelMask(aChanCfg).build())
+                .setBufferSizeInBytes(minBufSize).build();
+        audioTrack.play();
+        usbLogViewModel.log("Stream: Decoders and AudioTrack are ready.");
+    }
+
+    @Override
+    public void surfaceCreated(@NonNull SurfaceHolder holder) {
+        usbLogViewModel.log("Stream: Decoding surface created.");
+        this.decodingSurface = holder.getSurface();
+        if (isWatching) {
+            try {
+                setupDecoders();
+            } catch (Exception e) {
+                usbLogViewModel.log("ERROR: Failed to setup decoders on surfaceCreated", e);
+                if(getActivity() != null) getActivity().runOnUiThread(this::stopWatching);
             }
         }
     }
 
-    private void processDecoderOutput(MediaCodec decoder, MediaCodec.BufferInfo info, boolean isAudio) {
-        if (decoder == null) return;
-        int outIdx = decoder.dequeueOutputBuffer(info, 0);
-        while(outIdx >= 0) {
-            if (isAudio) {
-                ByteBuffer outBuf = decoder.getOutputBuffer(outIdx);
-                if (info.size > 0 && audioTrack != null) {
-                    byte[] chunk = new byte[info.size];
-                    outBuf.get(chunk);
-                    audioTrack.write(chunk, 0, info.size);
+    @Override
+    public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int width, int height) {}
+
+    @Override
+    public void surfaceDestroyed(@NonNull SurfaceHolder holder) {
+        usbLogViewModel.log("Stream: Decoding surface destroyed.");
+        cleanupDecoders();
+        this.decodingSurface = null;
+    }
+
+    private class DecoderCallback extends MediaCodec.Callback {
+        private final boolean isAudio;
+        DecoderCallback(boolean isAudio) { this.isAudio = isAudio; }
+
+        @Override
+        public void onOutputBufferAvailable(@NonNull MediaCodec codec, int index, @NonNull MediaCodec.BufferInfo info) {
+            try {
+                 if (isAudio) {
+                    ByteBuffer outBuf = codec.getOutputBuffer(index);
+                    if (outBuf != null && info.size > 0 && audioTrack != null && audioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                        byte[] chunk = new byte[info.size];
+                        outBuf.get(chunk);
+                        audioTrack.write(chunk, 0, info.size);
+                    }
+                    codec.releaseOutputBuffer(index, false);
+                } else {
+                    codec.releaseOutputBuffer(index, true);
                 }
-                decoder.releaseOutputBuffer(outIdx, false);
-            } else {
-                 decoder.releaseOutputBuffer(outIdx, true); // Render to surface
-            }
-            outIdx = decoder.dequeueOutputBuffer(info, 0);
-        }
-    }
-
-    private byte[] readExactly(int byteCount) throws IOException {
-        byte[] buffer = new byte[byteCount];
-        int offset = 0;
-        while (offset < byteCount) {
-            if (stopReading || connection == null || endpointIn == null) return null;
-            int bytesRead = connection.bulkTransfer(endpointIn, buffer, offset, byteCount - offset, 10000);
-            if (bytesRead > 0) {
-                offset += bytesRead;
-            } else {
-                 throw new IOException("Failed to read required bytes from USB");
+            } catch (Exception e) {
+                usbLogViewModel.log("ERROR: Stream decoder output buffer failed", e);
             }
         }
-        return buffer;
-    }
 
-    // --- COMMON USB & LIFECYCLE LOGIC ---
-
-    private void checkForConnectedDevice() {
-        HashMap<String, UsbDevice> deviceList = usbManager.getDeviceList();
-        if (deviceList.isEmpty()) return;
-        for (UsbDevice device : deviceList.values()) {
-             PendingIntent pi = PendingIntent.getBroadcast(getContext(), 0, new Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
-             usbManager.requestPermission(device, pi);
-             break;
-        }
-    }
-
-    private void setupCommunication(UsbDevice device) {
-        connection = usbManager.openDevice(device);
-        if (connection == null) {
-             Log.e(TAG, "Could not open device connection");
-             return;
-        }
-        UsbInterface usbInterface = device.getInterface(0); // Assuming single interface
-        if (!connection.claimInterface(usbInterface, true)) {
-            connection.close();
-            Log.e(TAG, "Could not claim interface");
-            return;
-        }
-        for (int j = 0; j < usbInterface.getEndpointCount(); j++) {
-            UsbEndpoint endpoint = usbInterface.getEndpoint(j);
-            if (endpoint.getType() == UsbConstants.USB_ENDPOINT_XFER_BULK) {
-                if (endpoint.getDirection() == UsbConstants.USB_DIR_IN) endpointIn = endpoint;
-                if (endpoint.getDirection() == UsbConstants.USB_DIR_OUT) endpointOut = endpoint;
-            }
-        }
-        if (endpointIn != null && endpointOut != null) {
-            isDeviceConnected = true;
-            if (getContext() != null) Toast.makeText(getContext(), "USB-устройство подключено.", Toast.LENGTH_SHORT).show();
-            startReading();
-        } else {
-            Log.e(TAG, "Could not find both IN and OUT endpoints");
-            closeConnection();
-        }
-    }
-
-    private void closeConnection() {
-        isDeviceConnected = false;
-        stopReading = true;
-        if (isStreaming) stopVideoStream();
-
-        if (readingThread != null) {
-            try { readingThread.join(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-            readingThread = null;
-        }
-
-        // Release all codecs and tracks
-        try { if (videoDecoder != null) { videoDecoder.stop(); videoDecoder.release(); } } catch (Exception e) { Log.e(TAG, "Err", e); } finally { videoDecoder = null; }
-        try { if (audioDecoder != null) { audioDecoder.stop(); audioDecoder.release(); } } catch (Exception e) { Log.e(TAG, "Err", e); } finally { audioDecoder = null; }
-        try { if (audioTrack != null) { audioTrack.stop(); audioTrack.release(); } } catch (Exception e) { Log.e(TAG, "Err", e); } finally { audioTrack = null; }
-
-        if (connection != null) {
-            connection.close();
-            connection = null;
-            endpointIn = null;
-            endpointOut = null;
-            Log.d(TAG, "USB-подключение закрыто.");
-        }
-
-         if (getActivity() != null) {
-            getActivity().runOnUiThread(() -> {
-                binding.cameraPreviewView.setVisibility(View.GONE);
-                binding.decodedStreamView.setVisibility(View.GONE);
-            });
-        }
+        @Override public void onInputBufferAvailable(@NonNull MediaCodec codec, int index) {}
+        @Override public void onError(@NonNull MediaCodec codec, @NonNull MediaCodec.CodecException e) { usbLogViewModel.log("ERROR: Stream Decoder error", e); }
+        @Override public void onOutputFormatChanged(@NonNull MediaCodec codec, @NonNull MediaFormat format) {}
     }
 
     @Override
     public void onDestroyView() {
         super.onDestroyView();
-        closeConnection();
-        if (cameraExecutor != null) cameraExecutor.shutdown();
-        if (streamingExecutor != null) streamingExecutor.shutdown();
-        try {
-            requireActivity().unregisterReceiver(usbReceiver);
-        } catch (Exception e) {
-            Log.w(TAG, "Unregister receiver failed", e);
+        stopStream();
+        stopWatching();
+        if (streamingExecutor != null && !streamingExecutor.isShutdown()) {
+            streamingExecutor.shutdown();
         }
         binding = null;
     }

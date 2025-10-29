@@ -4,29 +4,42 @@ import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.fragment.app.Fragment;
 import androidx.lifecycle.ViewModelProvider;
 
 import com.example.multimediaexchanger.databinding.FragmentHomeBinding;
+import com.example.multimediaexchanger.ui.UsbLogViewModel;
 
 public class HomeFragment extends Fragment {
 
     private FragmentHomeBinding binding;
+    private UsbLogViewModel usbLogViewModel;
 
     public View onCreateView(@NonNull LayoutInflater inflater,
                              ViewGroup container, Bundle savedInstanceState) {
-        HomeViewModel homeViewModel =
-                new ViewModelProvider(this).get(HomeViewModel.class);
-
         binding = FragmentHomeBinding.inflate(inflater, container, false);
-        View root = binding.getRoot();
+        // Get a reference to the shared ViewModel
+        usbLogViewModel = new ViewModelProvider(requireActivity()).get(UsbLogViewModel.class);
 
-        final TextView textView = binding.textHome;
-        homeViewModel.getText().observe(getViewLifecycleOwner(), textView::setText);
-        return root;
+        // Observe connection status
+        usbLogViewModel.isConnected().observe(getViewLifecycleOwner(), isConnected -> {
+            if (isConnected) {
+                binding.connectionIndicator.setBackgroundColor(getResources().getColor(android.R.color.holo_green_dark));
+            } else {
+                binding.connectionIndicator.setBackgroundColor(getResources().getColor(android.R.color.holo_red_dark));
+            }
+        });
+
+        // Observe logs
+        usbLogViewModel.getLogs().observe(getViewLifecycleOwner(), logs -> {
+            binding.logsTextView.setText(logs);
+        });
+
+        usbLogViewModel.log("HomeFragment view created.");
+
+        return binding.getRoot();
     }
 
     @Override

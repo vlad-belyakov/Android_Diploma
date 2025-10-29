@@ -3,13 +3,25 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/mobile_navigation"
-    app:startDestination="@+id/navigation_home">
+    app:startDestination="@+id/navigation_network">
 
     <fragment
-        android:id="@+id/navigation_home"
-        android:name="com.example.multimediaexchanger.ui.home.HomeFragment"
-        android:label="@string/title_home"
-        tools:layout="@layout/fragment_home" />
+        android:id="@+id/navigation_network"
+        android:name="com.example.multimediaexchanger.ui.network.NetworkFragment"
+        android:label="@string/title_network"
+        tools:layout="@layout/fragment_network" />
+
+    <fragment
+        android:id="@+id/navigation_messages"
+        android:name="com.example.multimediaexchanger.ui.messages.MessagesFragment"
+        android:label="@string/title_messages"
+        tools:layout="@layout/fragment_messages" />
+
+    <fragment
+        android:id="@+id/navigation_files"
+        android:name="com.example.multimediaexchanger.ui.files.FilesFragment"
+        android:label="@string/title_files"
+        tools:layout="@layout/fragment_files" />
 
     <fragment
         android:id="@+id/navigation_stream"
@@ -22,17 +34,5 @@
         android:name="com.example.multimediaexchanger.ui.calls.CallsFragment"
         android:label="@string/title_calls"
         tools:layout="@layout/fragment_calls" />
-
-    <fragment
-        android:id="@+id/navigation_files"
-        android:name="com.example.multimediaexchanger.ui.files.FilesFragment"
-        android:label="@string/title_files"
-        tools:layout="@layout/fragment_files" />
-
-    <fragment
-        android:id="@+id/navigation_messages"
-        android:name="com.example.multimediaexchanger.ui.messages.MessagesFragment"
-        android:label="@string/title_messages"
-        tools:layout="@layout/fragment_messages" />
 
 </navigation>

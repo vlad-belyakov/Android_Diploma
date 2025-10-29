@@ -1,6 +1,8 @@
 package com.example.multimediaexchanger.ui.messages;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
+import android.net.Uri;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -10,123 +12,123 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.RecyclerView;
 
+import com.bumptech.glide.Glide;
 import com.example.multimediaexchanger.R;
-import com.example.multimediaexchanger.databinding.ItemImageReceivedBinding;
-import com.example.multimediaexchanger.databinding.ItemImageSentBinding;
-import com.example.multimediaexchanger.databinding.ItemMessageReceivedBinding;
-import com.example.multimediaexchanger.databinding.ItemMessageSentBinding;
 
-import java.text.SimpleDateFormat;
-import java.util.Date;
 import java.util.List;
-import java.util.Locale;
 
 public class MessagesAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
 
-    private final List<Message> messages;
-    private final Context context;
-    private final SimpleDateFormat timeFormatter;
+    private static final int VIEW_TYPE_TEXT_SENT = 1;
+    private static final int VIEW_TYPE_TEXT_RECEIVED = 2;
+    private static final int VIEW_TYPE_IMAGE_SENT = 3;
+    private static final int VIEW_TYPE_IMAGE_RECEIVED = 4;
 
-    public MessagesAdapter(Context context, List<Message> messages) {
+    private final Context context;
+    private List<Message> messageList;
+
+    public MessagesAdapter(Context context, List<Message> messageList) {
         this.context = context;
-        this.messages = messages;
-        this.timeFormatter = new SimpleDateFormat("HH:mm", Locale.getDefault());
+        this.messageList = messageList;
+    }
+
+    @SuppressLint("NotifyDataSetChanged")
+    public void updateMessages(List<Message> newMessages) {
+        if (newMessages == null) return;
+        this.messageList = newMessages;
+        notifyDataSetChanged();
     }
 
     @Override
     public int getItemViewType(int position) {
-        return messages.get(position).getType().ordinal();
+        Message message = messageList.get(position);
+        switch (message.getType()) {
+            case TEXT_SENT: return VIEW_TYPE_TEXT_SENT;
+            case TEXT_RECEIVED: return VIEW_TYPE_TEXT_RECEIVED;
+            case IMAGE_SENT: return VIEW_TYPE_IMAGE_SENT;
+            case IMAGE_RECEIVED: return VIEW_TYPE_IMAGE_RECEIVED;
+            default: return -1;
+        }
     }
 
     @NonNull
     @Override
     public RecyclerView.ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
-        LayoutInflater inflater = LayoutInflater.from(parent.getContext());
-        if (viewType == Message.MessageType.TEXT_SENT.ordinal()) {
-            return new SentTextViewHolder(ItemMessageSentBinding.inflate(inflater, parent, false));
-        } else if (viewType == Message.MessageType.TEXT_RECEIVED.ordinal()) {
-            return new ReceivedTextViewHolder(ItemMessageReceivedBinding.inflate(inflater, parent, false));
-        } else if (viewType == Message.MessageType.IMAGE_SENT.ordinal()) {
-            return new SentImageViewHolder(ItemImageSentBinding.inflate(inflater, parent, false));
-        } else if (viewType == Message.MessageType.IMAGE_RECEIVED.ordinal()) {
-            return new ReceivedImageViewHolder(ItemImageReceivedBinding.inflate(inflater, parent, false));
+        View view;
+        switch (viewType) {
+            case VIEW_TYPE_TEXT_SENT:
+                view = LayoutInflater.from(context).inflate(R.layout.item_message_sent, parent, false);
+                return new TextMessageViewHolder(view);
+            case VIEW_TYPE_TEXT_RECEIVED:
+                view = LayoutInflater.from(context).inflate(R.layout.item_message_received, parent, false);
+                return new TextMessageViewHolder(view);
+            case VIEW_TYPE_IMAGE_SENT:
+                view = LayoutInflater.from(context).inflate(R.layout.item_image_sent, parent, false);
+                return new ImageMessageViewHolder(view);
+            case VIEW_TYPE_IMAGE_RECEIVED:
+                view = LayoutInflater.from(context).inflate(R.layout.item_image_received, parent, false);
+                return new ImageMessageViewHolder(view);
+            default: throw new IllegalArgumentException("Invalid view type");
         }
-        throw new RuntimeException("Unknown view type: " + viewType);
     }
 
     @Override
     public void onBindViewHolder(@NonNull RecyclerView.ViewHolder holder, int position) {
-        Message message = messages.get(position);
-        switch (message.getType()) {
-            case TEXT_SENT:
-                ((SentTextViewHolder) holder).bind(message, timeFormatter);
+        Message message = messageList.get(position);
+        switch (holder.getItemViewType()) {
+            case VIEW_TYPE_TEXT_SENT:
+            case VIEW_TYPE_TEXT_RECEIVED:
+                // --- FINAL, ROBUST FIX FOR TEXT MESSAGES ---
+                // This prevents crashes if a message from history has null text.
+                TextMessageViewHolder textHolder = (TextMessageViewHolder) holder;
+                if (message.getText() != null) {
+                    textHolder.messageTextView.setText(message.getText());
+                } else {
+                    textHolder.messageTextView.setText(""); // Set empty string to prevent crash
+                }
                 break;
-            case TEXT_RECEIVED:
-                ((ReceivedTextViewHolder) holder).bind(message, timeFormatter);
-                break;
-            case IMAGE_SENT:
-                ((SentImageViewHolder) holder).bind(message, timeFormatter);
-                break;
-            case IMAGE_RECEIVED:
-                ((ReceivedImageViewHolder) holder).bind(message, timeFormatter);
+            case VIEW_TYPE_IMAGE_SENT:
+            case VIEW_TYPE_IMAGE_RECEIVED:
+                ImageMessageViewHolder imageHolder = (ImageMessageViewHolder) holder;
+                try {
+                    Uri imageUri = message.getImageUri();
+                    if (imageUri == null && message.getImageUriString() != null) {
+                        imageUri = Uri.parse(message.getImageUriString());
+                    }
+
+                    if (imageUri != null) {
+                        Glide.with(context)
+                            .load(imageUri)
+                            .error(R.drawable.ic_broken_image)
+                            .into(imageHolder.imageView);
+                    } else {
+                        imageHolder.imageView.setImageResource(R.drawable.ic_broken_image);
+                    }
+                } catch (Exception e) {
+                    imageHolder.imageView.setImageResource(R.drawable.ic_broken_image);
+                }
                 break;
         }
     }
 
     @Override
     public int getItemCount() {
-        return messages.size();
+        return messageList.size();
     }
 
-    // ViewHolder for sent text messages
-    static class SentTextViewHolder extends RecyclerView.ViewHolder {
-        private final ItemMessageSentBinding binding;
-        SentTextViewHolder(ItemMessageSentBinding binding) {
-            super(binding.getRoot());
-            this.binding = binding;
-        }
-        void bind(Message message, SimpleDateFormat formatter) {
-            binding.messageText.setText(message.getText());
-            binding.messageTimestamp.setText(formatter.format(new Date(message.getTimestamp())));
+    public static class TextMessageViewHolder extends RecyclerView.ViewHolder {
+        TextView messageTextView;
+        public TextMessageViewHolder(@NonNull View itemView) {
+            super(itemView);
+            messageTextView = itemView.findViewById(R.id.messageTextView);
         }
     }
 
-    // ViewHolder for received text messages
-    static class ReceivedTextViewHolder extends RecyclerView.ViewHolder {
-        private final ItemMessageReceivedBinding binding;
-        ReceivedTextViewHolder(ItemMessageReceivedBinding binding) {
-            super(binding.getRoot());
-            this.binding = binding;
-        }
-        void bind(Message message, SimpleDateFormat formatter) {
-            binding.messageText.setText(message.getText());
-            binding.messageTimestamp.setText(formatter.format(new Date(message.getTimestamp())));
-        }
-    }
-
-    // ViewHolder for sent image messages
-    static class SentImageViewHolder extends RecyclerView.ViewHolder {
-        private final ItemImageSentBinding binding;
-        SentImageViewHolder(ItemImageSentBinding binding) {
-            super(binding.getRoot());
-            this.binding = binding;
-        }
-        void bind(Message message, SimpleDateFormat formatter) {
-            binding.imageView.setImageURI(message.getImageUri());
-            binding.messageTimestamp.setText(formatter.format(new Date(message.getTimestamp())));
-        }
-    }
-
-    // ViewHolder for received image messages
-    static class ReceivedImageViewHolder extends RecyclerView.ViewHolder {
-        private final ItemImageReceivedBinding binding;
-        ReceivedImageViewHolder(ItemImageReceivedBinding binding) {
-            super(binding.getRoot());
-            this.binding = binding;
-        }
-        void bind(Message message, SimpleDateFormat formatter) {
-            binding.imageView.setImageURI(message.getImageUri());
-            binding.messageTimestamp.setText(formatter.format(new Date(message.getTimestamp())));
+    public static class ImageMessageViewHolder extends RecyclerView.ViewHolder {
+        ImageView imageView;
+        public ImageMessageViewHolder(@NonNull View itemView) {
+            super(itemView);
+            imageView = itemView.findViewById(R.id.imageView);
         }
     }
 }

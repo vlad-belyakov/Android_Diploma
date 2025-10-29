@@ -1,10 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">MultiMediaExchanger</string>
     <string name="title_home">Home</string>
     <string name="title_dashboard">Dashboard</string>
     <string name="title_notifications">Notifications</string>
-    <string name="title_stream">Трансляция</string>
-    <string name="title_calls">Звонки</string>
-    <string name="title_files">Файлы</string>
-    <string name="title_messages">Сообщения</string>
+    <string name="title_stream">Stream</string>
+    <string name="title_calls">Calls</string>
+    <string name="title_files">Files</string>
+    <string name="title_messages">Messages</string>
+    <string name="title_network">Network</string>
 </resources>

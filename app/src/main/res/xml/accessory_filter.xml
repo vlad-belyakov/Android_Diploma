@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- This empty tag makes the filter match any USB accessory. -->
+    <usb-accessory />
+</resources>
