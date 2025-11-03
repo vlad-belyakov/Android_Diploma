@@ -11,7 +11,17 @@
         <item name="colorOnSecondary">@color/black</item>
         <!-- Status bar color. -->
         <item name="android:statusBarColor">?attr/colorPrimaryVariant</item>
+        
+        <!-- This is the correct attribute to override all MaterialButtons -->
+        <item name="materialButtonStyle">@style/App.Button.Default</item>
+
         <!-- Customize your theme here. -->
         <item name="android:windowBackground">@android:color/black</item>
+    </style>
+
+    <!-- Custom default style for all MaterialButtons -->
+    <style name="App.Button.Default" parent="Widget.MaterialComponents.Button">
+        <item name="cornerRadius">20dp</item>
+        <item name="backgroundTint">@android:color/holo_blue_light</item>
     </style>
 </resources>

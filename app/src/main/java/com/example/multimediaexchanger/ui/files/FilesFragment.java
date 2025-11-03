@@ -18,6 +18,7 @@ import android.widget.Toast;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.core.content.FileProvider;
 import androidx.fragment.app.Fragment;
 import androidx.lifecycle.ViewModelProvider;
@@ -51,9 +52,20 @@ public class FilesFragment extends Fragment {
     private FileOutputStream receivingFileStream;
     private String receivingFileName;
     private long receivingFileSize;
+    private long totalBytesReceived;
 
     private static final String TAG = "FilesFragment";
     private static final int CHUNK_SIZE = 1024 * 60; // 60KB per chunk
+
+    private static class FileDetails {
+        final String name;
+        final long size;
+
+        FileDetails(String name, long size) {
+            this.name = name;
+            this.size = size;
+        }
+    }
 
     private final ActivityResultLauncher<Intent> filePickerLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
@@ -86,8 +98,51 @@ public class FilesFragment extends Fragment {
         binding.deleteFilesButton.setOnClickListener(v -> showDeleteFilesDialog());
     }
 
+    @Nullable
+    private FileDetails getFileDetailsFromUri(@NonNull Uri uri) {
+        ContentResolver resolver = requireContext().getContentResolver();
+        String name = null;
+        long size = -1;
+
+        // Try to get details from ContentResolver query first
+        try (Cursor cursor = resolver.query(uri, null, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (nameIndex != -1) {
+                    name = cursor.getString(nameIndex);
+                }
+
+                int sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE);
+                if (sizeIndex != -1 && !cursor.isNull(sizeIndex)) {
+                    size = cursor.getLong(sizeIndex);
+                }
+            }
+        }
+
+        // If the above failed, try fallbacks
+        if (name == null) {
+            name = uri.getLastPathSegment(); // Fallback for name
+        }
+
+        if (size <= 0) { // Fallback for size
+            try (InputStream inputStream = resolver.openInputStream(uri)) {
+                if (inputStream != null) {
+                    size = inputStream.available();
+                }
+            } catch (IOException e) {
+                usbLogViewModel.log("WARN: Could not determine file size from input stream for " + name, e);
+                return null; // If we can't get the size, we can't reliably send the file.
+            }
+        }
+
+        if (name != null && size > 0) {
+            return new FileDetails(name, size);
+        } else {
+            return null;
+        }
+    }
+
     private void sendFile(final Uri fileUri) {
-        // --- FIXED: Get target IP from the central NetworkViewModel ---
         String targetIp = networkViewModel.getTargetIpAddress().getValue();
         if (targetIp == null || targetIp.isEmpty()) {
             Toast.makeText(getContext(), "IP адрес получателя не указан во вкладке 'Сеть'", Toast.LENGTH_LONG).show();
@@ -95,36 +150,52 @@ public class FilesFragment extends Fragment {
         }
 
         fileExecutor.execute(() -> {
-            try (Cursor cursor = requireActivity().getContentResolver().query(fileUri, null, null, null, null)) {
-                if (cursor != null && cursor.moveToFirst()) {
-                    @SuppressLint("Range") String fileName = cursor.getString(cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME));
-                    @SuppressLint("Range") long fileSize = cursor.getLong(cursor.getColumnIndex(OpenableColumns.SIZE));
-                    usbLogViewModel.log("Files: Sending file: " + fileName + " to " + targetIp);
+            FileDetails fileDetails = getFileDetailsFromUri(fileUri);
 
-                    // Step 1: Send File Header
-                    byte[] fileNameBytes = fileName.getBytes(StandardCharsets.UTF_8);
-                    ByteBuffer headerBuffer = ByteBuffer.allocate(8 + 4 + fileNameBytes.length);
-                    headerBuffer.putLong(fileSize).putInt(fileNameBytes.length).put(fileNameBytes);
-                    udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_FILE_HEADER, headerBuffer.array());
-
-                    // Step 2: Send File Chunks
-                    try (InputStream inputStream = requireActivity().getContentResolver().openInputStream(fileUri)) {
-                        byte[] buffer = new byte[CHUNK_SIZE];
-                        int bytesRead;
-                        while ((bytesRead = inputStream.read(buffer)) != -1) {
-                            udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_FILE_CHUNK, ByteBuffer.wrap(buffer, 0, bytesRead).array());
-                            Thread.sleep(2);
-                        }
-                    }
-
-                    // Step 3: Send File End
-                    udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_FILE_END, new byte[0]);
-                    usbLogViewModel.log("Files: Finished sending " + fileName);
-                    requireActivity().runOnUiThread(() -> Toast.makeText(getContext(), "Отправлено: " + fileName, Toast.LENGTH_SHORT).show());
+            if (fileDetails == null) {
+                usbLogViewModel.log("Files: Error getting file details from URI: " + fileUri);
+                if (getActivity() != null) {
+                    getActivity().runOnUiThread(() -> Toast.makeText(getContext(), "Не удалось получить информацию о файле", Toast.LENGTH_SHORT).show());
                 }
+                return;
+            }
+
+            String fileName = fileDetails.name;
+            long fileSize = fileDetails.size;
+
+            try {
+                usbLogViewModel.log("Files: Sending file: " + fileName + " to " + targetIp);
+
+                // Step 1: Send File Header
+                byte[] fileNameBytes = fileName.getBytes(StandardCharsets.UTF_8);
+                ByteBuffer headerBuffer = ByteBuffer.allocate(8 + 4 + fileNameBytes.length);
+                headerBuffer.putLong(fileSize).putInt(fileNameBytes.length).put(fileNameBytes);
+                udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_FILE_HEADER, headerBuffer.array());
+
+                // Step 2: Send File Chunks
+                try (InputStream inputStream = requireActivity().getContentResolver().openInputStream(fileUri)) {
+                    if (inputStream == null) throw new IOException("Failed to open input stream for URI: " + fileUri);
+
+                    byte[] buffer = new byte[CHUNK_SIZE];
+                    int bytesRead;
+                    while ((bytesRead = inputStream.read(buffer)) != -1) {
+                        byte[] chunkData = new byte[bytesRead];
+                        System.arraycopy(buffer, 0, chunkData, 0, bytesRead);
+                        udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_FILE_CHUNK, chunkData);
+                        Thread.sleep(5); // Small delay to avoid network congestion
+                    }
+                }
+
+                // Step 3: Send File End
+                udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_FILE_END, new byte[0]);
+                usbLogViewModel.log("Files: Finished sending " + fileName);
+                requireActivity().runOnUiThread(() -> Toast.makeText(getContext(), "Отправлено: " + fileName, Toast.LENGTH_SHORT).show());
+
             } catch (Exception e) {
-                usbLogViewModel.log("Files: Error sending file: " + e.getMessage());
-                Log.e(TAG, "Ошибка отправки файла", e);
+                usbLogViewModel.log("Files: Error sending file: " + fileName, e);
+                if (getActivity() != null) {
+                    getActivity().runOnUiThread(() -> Toast.makeText(getContext(), "Ошибка при отправке файла", Toast.LENGTH_SHORT).show());
+                }
             }
         });
     }
@@ -132,31 +203,41 @@ public class FilesFragment extends Fragment {
     private void observeIncomingData() {
         udpViewModel.getReceivedMessage().observe(getViewLifecycleOwner(), message -> {
             if (message == null) return;
-            switch (message.type) {
-                case UdpViewModel.MESSAGE_TYPE_FILE_HEADER: handleFileHeader(message.payload); break;
-                case UdpViewModel.MESSAGE_TYPE_FILE_CHUNK: handleFileChunk(message.payload); break;
-                case UdpViewModel.MESSAGE_TYPE_FILE_END: handleFileEnd(); break;
-            }
+            fileExecutor.execute(() -> { // Process file messages on a background thread
+                 switch (message.type) {
+                    case UdpViewModel.MESSAGE_TYPE_FILE_HEADER: handleFileHeader(message.payload); break;
+                    case UdpViewModel.MESSAGE_TYPE_FILE_CHUNK: handleFileChunk(message.payload); break;
+                    case UdpViewModel.MESSAGE_TYPE_FILE_END: handleFileEnd(); break;
+                }
+            });
         });
     }
 
     private void handleFileHeader(byte[] payload) {
         try {
+            // If we are already receiving a file, discard the old one
+            if (receivingFileStream != null) {
+                usbLogViewModel.log("WARN: Received new file header while another is in progress. Discarding old one.");
+                receivingFileStream.close();
+            }
+
             ByteBuffer buffer = ByteBuffer.wrap(payload);
             receivingFileSize = buffer.getLong();
             int fileNameLength = buffer.getInt();
             byte[] fileNameBytes = new byte[fileNameLength];
             buffer.get(fileNameBytes);
             receivingFileName = new String(fileNameBytes, StandardCharsets.UTF_8);
+            totalBytesReceived = 0;
 
-            usbLogViewModel.log("Files: Receiving header for " + receivingFileName);
+            usbLogViewModel.log("Files: Receiving header for " + receivingFileName + " (" + receivingFileSize + " bytes)");
 
             File file = new File(requireContext().getExternalFilesDir(null), receivingFileName);
             receivingFileStream = new FileOutputStream(file);
             requireActivity().runOnUiThread(() -> Toast.makeText(getContext(), "Начало приема файла: " + receivingFileName, Toast.LENGTH_SHORT).show());
 
         } catch (Exception e) {
-            Log.e(TAG, "Ошибка обработки заголовка файла", e);
+            usbLogViewModel.log("ERROR: Failed to handle file header", e);
+            resetReceivingState();
         }
     }
 
@@ -164,30 +245,67 @@ public class FilesFragment extends Fragment {
         if (receivingFileStream == null) return;
         try {
             receivingFileStream.write(payload);
+            totalBytesReceived += payload.length;
         } catch (IOException e) {
-            Log.e(TAG, "Ошибка записи части файла", e);
+            usbLogViewModel.log("ERROR: Failed to write file chunk", e);
+            resetReceivingState();
         }
     }
 
     private void handleFileEnd() {
         if (receivingFileStream == null) return;
-        try {
-            receivingFileStream.close();
-            usbLogViewModel.log("Files: Finished receiving " + receivingFileName);
 
-            File receivedFile = new File(requireContext().getExternalFilesDir(null), receivingFileName);
-            if (receivedFile.exists() && receivedFile.length() == receivingFileSize) {
-                synchronized (receivedFiles) { receivedFiles.add(receivedFile); }
-                requireActivity().runOnUiThread(() -> Toast.makeText(getContext(), "Файл " + receivingFileName + " успешно получен", Toast.LENGTH_LONG).show());
-            } else {
-                 requireActivity().runOnUiThread(() -> Toast.makeText(getContext(), "Ошибка приема файла " + receivingFileName, Toast.LENGTH_LONG).show());
+        final String finalFileName = receivingFileName;
+        final long finalFileSize = receivingFileSize;
+        final long finalTotalBytesReceived = totalBytesReceived;
+
+        resetReceivingState(); // Reset state immediately
+
+        File receivedFile = new File(requireContext().getExternalFilesDir(null), finalFileName);
+        String failReason = null;
+
+        if (!receivedFile.exists()) {
+            failReason = "файл не был создан";
+        } else if (receivedFile.length() != finalFileSize) {
+            failReason = "неверный итоговый размер (ожидалось: " + finalFileSize + ", по факту: " + receivedFile.length() + ")";
+        }
+
+        String logMessage = "Files: Finished receiving " + finalFileName + ". Expected size: " + finalFileSize + ", Total bytes received: " + finalTotalBytesReceived + ", Actual file size: " + (receivedFile.exists() ? receivedFile.length() : "N/A");
+        usbLogViewModel.log(logMessage);
+
+        if (failReason == null) {
+            synchronized (receivedFiles) { receivedFiles.add(receivedFile); }
+            requireActivity().runOnUiThread(() -> {
+                Toast.makeText(getContext(), "Файл " + finalFileName + " успешно получен", Toast.LENGTH_LONG).show();
+                if (binding != null) {
+                    binding.openReceivedFileButton.setVisibility(View.VISIBLE);
+                    binding.deleteFilesButton.setVisibility(View.VISIBLE);
+                }
+            });
+        } else {
+            final String errorMessage = "Ошибка приема файла " + finalFileName + ": " + failReason;
+            usbLogViewModel.log("ERROR: " + errorMessage);
+            requireActivity().runOnUiThread(() -> Toast.makeText(getContext(), errorMessage, Toast.LENGTH_LONG).show());
+            if (receivedFile.exists()) {
+                receivedFile.delete(); // Clean up partial/corrupt file
             }
-        } catch (IOException e) {
-            Log.e(TAG, "Ошибка завершения файла", e);
-        } finally {
-            receivingFileStream = null;
         }
     }
+
+    private void resetReceivingState() {
+        try {
+            if (receivingFileStream != null) {
+                receivingFileStream.close();
+            }
+        } catch (IOException e) {
+            usbLogViewModel.log("WARN: Failed to close file stream on reset", e);
+        }
+        receivingFileStream = null;
+        receivingFileName = null;
+        receivingFileSize = 0;
+        totalBytesReceived = 0;
+    }
+
 
     // ... (Dialog methods like showReceivedFilesDialog, openFile, etc. remain unchanged)
     private void showReceivedFilesDialog() {

@@ -1,7 +1,11 @@
 package com.example.multimediaexchanger.ui.network;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.graphics.Color;
 import android.os.Bundle;
+import android.text.method.ScrollingMovementMethod;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -36,46 +40,43 @@ public class NetworkFragment extends Fragment {
         udpViewModel = new ViewModelProvider(requireActivity()).get(UdpViewModel.class);
         usbLogViewModel = new ViewModelProvider(requireActivity()).get(UsbLogViewModel.class);
 
-        final TextView myIpAddressText = binding.myIpAddressText;
-        final TextView connectionStatusText = binding.connectionStatusText; // The new field
-        final EditText ipAddressInput = binding.ipAddressInput;
-        final Button connectButton = binding.connectButton;
         final TextView logTextView = binding.logTextView;
         final ScrollView logScrollView = binding.logScrollView;
 
-        // Observer for device's own IP
-        networkViewModel.getDeviceIpAddress().observe(getViewLifecycleOwner(), myIpAddressText::setText);
+        // Make the TextView scrollable
+        logTextView.setMovementMethod(new ScrollingMovementMethod());
 
-        // --- ADDED: Observer for connection status ---
+        // Observer for device's own IP
+        networkViewModel.getDeviceIpAddress().observe(getViewLifecycleOwner(), binding.myIpAddressText::setText);
+
+        // Observer for connection status
         networkViewModel.getTargetIpAddress().observe(getViewLifecycleOwner(), targetIp -> {
             if (targetIp != null && !targetIp.isEmpty()) {
-                connectionStatusText.setText("Подключено к: " + targetIp);
-                connectionStatusText.setBackgroundColor(Color.parseColor("#388E3C")); // Green
+                binding.connectionStatusText.setText("Подключено к: " + targetIp);
+                binding.connectionStatusText.setBackgroundColor(Color.parseColor("#388E3C")); // Green
             } else {
-                connectionStatusText.setText("Нет подключения");
-                connectionStatusText.setBackgroundColor(Color.parseColor("#D32F2F")); // Red
+                binding.connectionStatusText.setText("Нет подключения");
+                binding.connectionStatusText.setBackgroundColor(Color.parseColor("#D32F2F")); // Red
             }
         });
 
-        // Observer for logs
+        // Observer for logs with auto-scroll
         usbLogViewModel.getLogs().observe(getViewLifecycleOwner(), logText -> {
             logTextView.setText(logText);
+            // Post a runnable to scroll down, which will be executed after the layout pass
             logScrollView.post(() -> logScrollView.fullScroll(View.FOCUS_DOWN));
         });
 
-        // Observer for discovered peers
+        // Listener for discovered peers - This now ONLY logs, no auto-connect action
         udpViewModel.getDiscoveredIpEvent().observe(getViewLifecycleOwner(), discoveredIp -> {
-            String currentTargetIp = networkViewModel.getTargetIpAddress().getValue();
-            if (discoveredIp != null && !discoveredIp.equals(networkViewModel.getRawDeviceIpAddress().getValue()) && !discoveredIp.equals(currentTargetIp)) {
-                usbLogViewModel.log("Net: Peer discovered at " + discoveredIp + ". Set as target.");
-                ipAddressInput.setText(discoveredIp);
-                networkViewModel.setTargetIpAddress(discoveredIp);
+            if (discoveredIp != null && !discoveredIp.equals(networkViewModel.getRawDeviceIpAddress().getValue())) {
+                usbLogViewModel.log("Net: Peer discovered at " + discoveredIp + ". You can connect manually.");
             }
         });
 
         // Click listener for the connect button
-        connectButton.setOnClickListener(v -> {
-            String ip = ipAddressInput.getText().toString();
+        binding.connectButton.setOnClickListener(v -> {
+            String ip = binding.ipAddressInput.getText().toString();
             if (!ip.isEmpty() && ip.contains(".")) {
                 networkViewModel.setTargetIpAddress(ip);
                 udpViewModel.sendHandshake(ip);
@@ -83,6 +84,28 @@ public class NetworkFragment extends Fragment {
             } else {
                 Toast.makeText(getContext(), "Введите корректный IP адрес", Toast.LENGTH_SHORT).show();
             }
+        });
+
+        // Click listener for the copy logs button to copy the last 100 lines
+        binding.copyLogsButton.setOnClickListener(v -> {
+            String allLogs = logTextView.getText().toString();
+            String[] lines = allLogs.split("\n");
+            int start = Math.max(0, lines.length - 100);
+            StringBuilder last100Lines = new StringBuilder();
+            for (int i = start; i < lines.length; i++) {
+                last100Lines.append(lines[i]).append("\n");
+            }
+
+            ClipboardManager clipboard = (ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
+            ClipData clip = ClipData.newPlainText("Last 100 Logs", last100Lines.toString());
+            clipboard.setPrimaryClip(clip);
+            Toast.makeText(getContext(), "Последние 100 строк логов скопированы", Toast.LENGTH_SHORT).show();
+        });
+
+        // Click listener for the clear logs button
+        binding.clearLogsButton.setOnClickListener(v -> {
+            usbLogViewModel.clearLogs();
+            Toast.makeText(getContext(), "Логи очищены", Toast.LENGTH_SHORT).show();
         });
 
         return binding.getRoot();

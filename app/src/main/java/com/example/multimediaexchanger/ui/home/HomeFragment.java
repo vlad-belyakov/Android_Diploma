@@ -11,20 +11,24 @@ import androidx.lifecycle.ViewModelProvider;
 
 import com.example.multimediaexchanger.databinding.FragmentHomeBinding;
 import com.example.multimediaexchanger.ui.UsbLogViewModel;
+import com.example.multimediaexchanger.ui.network.NetworkViewModel;
 
 public class HomeFragment extends Fragment {
 
     private FragmentHomeBinding binding;
     private UsbLogViewModel usbLogViewModel;
+    private NetworkViewModel networkViewModel;
 
     public View onCreateView(@NonNull LayoutInflater inflater,
                              ViewGroup container, Bundle savedInstanceState) {
         binding = FragmentHomeBinding.inflate(inflater, container, false);
-        // Get a reference to the shared ViewModel
+        // Get a reference to the shared ViewModels
         usbLogViewModel = new ViewModelProvider(requireActivity()).get(UsbLogViewModel.class);
+        networkViewModel = new ViewModelProvider(requireActivity()).get(NetworkViewModel.class);
 
-        // Observe connection status
-        usbLogViewModel.isConnected().observe(getViewLifecycleOwner(), isConnected -> {
+        // Observe connection status from the correct ViewModel
+        networkViewModel.getTargetIpAddress().observe(getViewLifecycleOwner(), targetIp -> {
+            boolean isConnected = targetIp != null && !targetIp.isEmpty();
             if (isConnected) {
                 binding.connectionIndicator.setBackgroundColor(getResources().getColor(android.R.color.holo_green_dark));
             } else {

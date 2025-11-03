@@ -44,10 +44,21 @@ public class UdpViewModel extends AndroidViewModel {
     public static final byte MESSAGE_TYPE_FILE_HEADER = 0x02;
     public static final byte MESSAGE_TYPE_FILE_CHUNK = 0x03;
     public static final byte MESSAGE_TYPE_FILE_END = 0x04;
-    public static final byte MESSAGE_TYPE_STREAM = 0x05;
-    public static final byte MESSAGE_TYPE_CALL = 0x06;
-    public static final byte MESSAGE_TYPE_DISCOVERY = 0x0A;
     public static final byte MESSAGE_TYPE_HANDSHAKE = 0x0B;
+
+    // Call Signaling Message Types
+    public static final byte MESSAGE_TYPE_CALL_REQUEST = 0x10;
+    public static final byte MESSAGE_TYPE_CALL_ACCEPT = 0x11;
+    public static final byte MESSAGE_TYPE_CALL_REJECT = 0x12;
+    public static final byte MESSAGE_TYPE_CALL_END = 0x13;
+    public static final byte MESSAGE_TYPE_CALL_AUDIO = 0x14; // Renamed from STREAM
+
+    // Stream Signaling Message Types
+    public static final byte MESSAGE_TYPE_STREAM_VIDEO_CONFIG = 0x20;
+    public static final byte MESSAGE_TYPE_STREAM_VIDEO_DATA = 0x21;
+    public static final byte MESSAGE_TYPE_STREAM_AUDIO_CONFIG = 0x22;
+    public static final byte MESSAGE_TYPE_STREAM_AUDIO_DATA = 0x23;
+
 
     public UdpViewModel(@NonNull Application application) {
         super(application);
@@ -107,10 +118,6 @@ public class UdpViewModel extends AndroidViewModel {
                             log("UDP: RX: Received " + packet.getLength() + " bytes from " + senderIp + " of type " + String.format("0x%02X", messageType));
 
                             switch(messageType){
-                                case MESSAGE_TYPE_DISCOVERY:
-                                    String discoveredIp = new String(payload, StandardCharsets.UTF_8);
-                                    discoveredIpEvent.postValue(discoveredIp);
-                                    break;
                                 case MESSAGE_TYPE_HANDSHAKE:
                                     log("UDP: RX: Handshake received from " + senderIp);
                                     discoveredIpEvent.postValue(senderIp);
@@ -158,32 +165,6 @@ public class UdpViewModel extends AndroidViewModel {
     public void sendHandshake(String ipAddress) {
         log("UDP: Queuing handshake to " + ipAddress);
         sendData(ipAddress, MESSAGE_TYPE_HANDSHAKE, new byte[0]);
-    }
-
-    public void broadcastDiscovery(String ownIp) {
-        if (ownIp == null || ownIp.isEmpty() || !ownIp.contains(".")) return;
-        
-        executorService.execute(() -> {
-            if (socket == null || socket.isClosed()) {
-                log("ERROR: Cannot broadcast, socket is not ready.");
-                return;
-            }
-            try {
-                socket.setBroadcast(true);
-                String broadcastAddress = ownIp.substring(0, ownIp.lastIndexOf(".")) + ".255";
-                InetAddress address = InetAddress.getByName(broadcastAddress);
-                
-                byte[] ipBytes = ownIp.getBytes(StandardCharsets.UTF_8);
-                byte[] message = new byte[ipBytes.length + 1];
-                message[0] = MESSAGE_TYPE_DISCOVERY;
-                System.arraycopy(ipBytes, 0, message, 1, ipBytes.length);
-
-                DatagramPacket packet = new DatagramPacket(message, message.length, address, LISTEN_PORT);
-                socket.send(packet);
-            } catch (Exception e) {
-                log("ERROR: Failed to broadcast discovery", e);
-            }
-        });
     }
 
     private void closeSocket(){

@@ -6,35 +6,42 @@
     android:layout_height="match_parent"
     tools:context=".ui.stream.StreamFragment">
 
-    <androidx.camera.view.PreviewView
-        android:id="@+id/camera_preview_view"
+    <com.example.multimediaexchanger.ui.custom.AspectRatioFrameLayout
+        android:id="@+id/stream_container"
         android:layout_width="0dp"
         android:layout_height="0dp"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintBottom_toTopOf="@+id/start_stream_button"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        android:visibility="gone"/>
+        app:layout_constraintEnd_toEndOf="parent">
 
-    <SurfaceView
-        android:id="@+id/decoded_stream_view"
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintBottom_toTopOf="@+id/start_stream_button"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        android:visibility="gone" />
+        <!-- Preview for the person streaming OUT -->
+        <androidx.camera.view.PreviewView
+            android:id="@+id/camera_preview_view"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone"
+            tools:visibility="visible"/>
+
+        <!-- Surface for watching an INCOMING stream -->
+        <SurfaceView
+            android:id="@+id/decoded_stream_view"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
+
+    </com.example.multimediaexchanger.ui.custom.AspectRatioFrameLayout>
 
     <Button
         android:id="@+id/start_stream_button"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
+        android:layout_margin="8dp"
+        android:backgroundTint="@android:color/holo_red_dark"
         android:text="Начать трансляцию"
         app:layout_constraintBottom_toTopOf="@+id/watch_stream_button"
-        app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        android:layout_margin="8dp"/>
+        app:layout_constraintStart_toStartOf="parent" />
 
     <Button
         android:id="@+id/watch_stream_button"

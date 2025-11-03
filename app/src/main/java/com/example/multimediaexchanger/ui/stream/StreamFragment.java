@@ -7,11 +7,14 @@ import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
+import android.media.Image;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.media.MediaRecorder;
 import android.os.Bundle;
+import android.util.Log;
+import android.util.Size;
 import android.view.LayoutInflater;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -23,6 +26,8 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.camera.core.CameraSelector;
+import androidx.camera.core.ImageAnalysis;
+import androidx.camera.core.ImageProxy;
 import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.core.content.ContextCompat;
@@ -50,8 +55,7 @@ public class StreamFragment extends Fragment implements SurfaceHolder.Callback {
     private volatile boolean isStreaming = false;
     private volatile boolean isWatching = false;
 
-    private static final byte PACKET_TYPE_VIDEO = 0x10;
-    private static final byte PACKET_TYPE_AUDIO = 0x20;
+    private static final String TAG = "StreamFragment";
 
     private ListenableFuture<ProcessCameraProvider> cameraProviderFuture;
     private ExecutorService streamingExecutor;
@@ -62,6 +66,7 @@ public class StreamFragment extends Fragment implements SurfaceHolder.Callback {
 
     private static final int VIDEO_WIDTH = 640, VIDEO_HEIGHT = 480, VIDEO_BITRATE = 1000000, VIDEO_FRAME_RATE = 20;
     private static final int AUDIO_SAMPLE_RATE = 44100, AUDIO_BITRATE = 64000, AUDIO_CHANNEL_COUNT = 1;
+    private int audioInputBufferSize;
 
     private final ActivityResultLauncher<String[]> requestPermissionsLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(), perms -> {
@@ -73,19 +78,14 @@ public class StreamFragment extends Fragment implements SurfaceHolder.Callback {
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
         binding = FragmentStreamBinding.inflate(inflater, container, false);
-
         streamingExecutor = Executors.newCachedThreadPool();
-
         udpViewModel = new ViewModelProvider(requireActivity()).get(UdpViewModel.class);
         networkViewModel = new ViewModelProvider(requireActivity()).get(NetworkViewModel.class);
         usbLogViewModel = new ViewModelProvider(requireActivity()).get(UsbLogViewModel.class);
-
         binding.decodedStreamView.getHolder().addCallback(this);
-
         setupClickListeners();
         checkPermissions();
         observeIncomingData();
-
         return binding.getRoot();
     }
 
@@ -103,7 +103,6 @@ public class StreamFragment extends Fragment implements SurfaceHolder.Callback {
                 startStream();
             }
         });
-
         binding.watchStreamButton.setOnClickListener(v -> {
             if (isWatching) {
                 stopWatching();
@@ -120,7 +119,10 @@ public class StreamFragment extends Fragment implements SurfaceHolder.Callback {
         }
     }
 
-    @SuppressLint("MissingPermission")
+    // =========================================================================================
+    // STREAMING (SENDING) LOGIC
+    // =========================================================================================
+
     private void startStream() {
         isStreaming = true;
         usbLogViewModel.log("Stream: Starting stream...");
@@ -129,13 +131,10 @@ public class StreamFragment extends Fragment implements SurfaceHolder.Callback {
             binding.cameraPreviewView.setVisibility(View.VISIBLE);
             binding.decodedStreamView.setVisibility(View.GONE);
         });
-
         streamingExecutor.execute(() -> {
             try {
-                setupVideoEncoder();
-                setupAudioEncoder();
-                streamingExecutor.execute(this::streamAudio);
-                requireActivity().runOnUiThread(this::startCameraStream);
+                setupEncoders();
+                requireActivity().runOnUiThread(this::startCameraAndEncoders);
             } catch (Exception e) {
                 usbLogViewModel.log("ERROR: Stream setup failed", e);
                 if (getActivity() != null) getActivity().runOnUiThread(this::stopStream);
@@ -143,48 +142,15 @@ public class StreamFragment extends Fragment implements SurfaceHolder.Callback {
         });
     }
 
-    private void startCameraStream() {
-        cameraProviderFuture = ProcessCameraProvider.getInstance(requireContext());
-        cameraProviderFuture.addListener(() -> {
-            try {
-                ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
-                Preview preview = new Preview.Builder().build();
-                preview.setSurfaceProvider(binding.cameraPreviewView.getSurfaceProvider());
-
-                if (videoEncoder != null) {
-                    preview.setSurfaceProvider(ContextCompat.getMainExecutor(requireContext()), surfaceRequest -> {
-                        Surface surface = videoEncoder.createInputSurface();
-                        surfaceRequest.provideSurface(surface, ContextCompat.getMainExecutor(requireContext()), result -> {});
-                    });
-                }
-
-                cameraProvider.unbindAll();
-                cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview);
-
-            } catch (Exception e) {
-                usbLogViewModel.log("ERROR: Failed to bind camera for streaming", e);
-                stopStream();
-            }
-        }, ContextCompat.getMainExecutor(requireContext()));
-    }
-
     private void stopStream() {
         if (!isStreaming) return;
         isStreaming = false;
-
+        usbLogViewModel.log("Stream: Streaming stopped.");
         try {
             if (cameraProviderFuture != null && cameraProviderFuture.get() != null) cameraProviderFuture.get().unbindAll();
         } catch (Exception e) { usbLogViewModel.log("WARN: Error unbinding camera", e); }
-        try { if (videoEncoder != null) { videoEncoder.stop(); videoEncoder.release(); videoEncoder = null; } } catch (Exception e) { usbLogViewModel.log("WARN: Video encoder cleanup failed", e); }
-        try { if (audioEncoder != null) { audioEncoder.stop(); audioEncoder.release(); audioEncoder = null; } } catch (Exception e) { usbLogViewModel.log("WARN: Audio encoder cleanup failed", e); }
 
-        if (audioRecord != null) {
-            try {
-                if (audioRecord.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) audioRecord.stop();
-                audioRecord.release();
-            } catch (Exception e) { usbLogViewModel.log("WARN: AudioRecord cleanup failed", e); }
-            audioRecord = null;
-        }
+        streamingExecutor.execute(this::cleanupEncoders);
 
         if (getActivity() != null) {
             getActivity().runOnUiThread(() -> {
@@ -192,91 +158,122 @@ public class StreamFragment extends Fragment implements SurfaceHolder.Callback {
                 binding.cameraPreviewView.setVisibility(View.GONE);
             });
         }
-        usbLogViewModel.log("Stream: Streaming stopped.");
     }
 
     @SuppressLint("MissingPermission")
-    private void streamAudio() {
-        int bufferSize = AudioRecord.getMinBufferSize(AUDIO_SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
-        audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC, AUDIO_SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize);
-        audioRecord.startRecording();
+    private void setupEncoders() throws IOException {
+        // Video Encoder
+        videoEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
+        MediaFormat videoFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, VIDEO_WIDTH, VIDEO_HEIGHT);
+        videoFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible);
+        videoFormat.setInteger(MediaFormat.KEY_BIT_RATE, VIDEO_BITRATE);
+        videoFormat.setInteger(MediaFormat.KEY_FRAME_RATE, VIDEO_FRAME_RATE);
+        videoFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+        videoEncoder.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        videoEncoder.setCallback(new EncoderCallback(true));
 
-        while (isStreaming) {
-            if (audioEncoder == null) break;
+        // Audio Encoder
+        audioEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC);
+        MediaFormat audioFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_COUNT);
+        audioFormat.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC);
+        audioFormat.setInteger(MediaFormat.KEY_BIT_RATE, AUDIO_BITRATE);
+        audioInputBufferSize = AudioRecord.getMinBufferSize(AUDIO_SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+        audioEncoder.configure(audioFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        audioEncoder.setCallback(new EncoderCallback(false));
+        audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC, AUDIO_SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, audioInputBufferSize);
+    }
+
+    private void startCameraAndEncoders() {
+        cameraProviderFuture = ProcessCameraProvider.getInstance(requireContext());
+        cameraProviderFuture.addListener(() -> {
+            try {
+                ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
+                
+                Preview preview = new Preview.Builder().build();
+                preview.setSurfaceProvider(binding.cameraPreviewView.getSurfaceProvider());
+
+                ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
+                        .setTargetResolution(new Size(VIDEO_WIDTH, VIDEO_HEIGHT))
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build();
+                imageAnalysis.setAnalyzer(streamingExecutor, this::processImageForEncoder);
+
+                cameraProvider.unbindAll();
+                cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageAnalysis);
+
+                videoEncoder.start();
+                audioEncoder.start();
+                audioRecord.startRecording();
+
+                streamingExecutor.execute(this::audioEncodingLoop);
+
+            } catch (Exception e) {
+                usbLogViewModel.log("ERROR: Failed to bind camera for streaming", e);
+                stopStream();
+            }
+        }, ContextCompat.getMainExecutor(requireContext()));
+    }
+    
+    private void processImageForEncoder(ImageProxy image) {
+         if (isStreaming && videoEncoder != null && image.getImage() != null) {
+            try {
+                int inputBufferIndex = videoEncoder.dequeueInputBuffer(-1);
+                if (inputBufferIndex >= 0) {
+                    ByteBuffer inputBuffer = videoEncoder.getInputBuffer(inputBufferIndex);
+                    inputBuffer.clear();
+                    // Simplified YUV420 to NV21 conversion
+                    ByteBuffer yBuffer = image.getPlanes()[0].getBuffer();
+                    ByteBuffer uBuffer = image.getPlanes()[1].getBuffer();
+                    ByteBuffer vBuffer = image.getPlanes()[2].getBuffer();
+                    int ySize = yBuffer.remaining();
+                    int uSize = uBuffer.remaining();
+                    int vSize = vBuffer.remaining();
+                    byte[] nv21 = new byte[ySize + uSize + vSize];
+                    yBuffer.get(nv21, 0, ySize);
+                    vBuffer.get(nv21, ySize, vSize);
+                    uBuffer.get(nv21, ySize + vSize, uSize);
+
+                    inputBuffer.put(nv21);
+                    videoEncoder.queueInputBuffer(inputBufferIndex, 0, nv21.length, image.getImageInfo().getTimestamp(), 0);
+                }
+            } catch (Exception e) {
+                usbLogViewModel.log("WARN: Image processing for encoder failed", e);
+            } finally {
+                image.close();
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private void audioEncodingLoop() {
+        while (isStreaming && audioRecord != null && audioRecord.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) {
             try {
                 int inputBufferIndex = audioEncoder.dequeueInputBuffer(-1);
                 if (inputBufferIndex >= 0) {
                     ByteBuffer inputBuffer = audioEncoder.getInputBuffer(inputBufferIndex);
-                    if (inputBuffer != null) {
-                        inputBuffer.clear();
-                        int length = audioRecord.read(inputBuffer, bufferSize);
-                        if (length > 0) {
-                            audioEncoder.queueInputBuffer(inputBufferIndex, 0, length, System.nanoTime() / 1000, 0);
-                        }
+                    inputBuffer.clear();
+                    int length = audioRecord.read(inputBuffer, audioInputBufferSize);
+                    if (length > 0) {
+                        audioEncoder.queueInputBuffer(inputBufferIndex, 0, length, System.nanoTime() / 1000, 0);
                     }
                 }
             } catch (Exception e) {
-                usbLogViewModel.log("WARN: Audio streaming read/queue failed", e);
+                usbLogViewModel.log("ERROR: Audio encoding loop failed", e);
+                break;
             }
         }
     }
 
-    private void setupVideoEncoder() throws IOException {
-        MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, VIDEO_WIDTH, VIDEO_HEIGHT);
-        format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
-        format.setInteger(MediaFormat.KEY_BIT_RATE, VIDEO_BITRATE);
-        format.setInteger(MediaFormat.KEY_FRAME_RATE, VIDEO_FRAME_RATE);
-        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
-
-        videoEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
-        videoEncoder.setCallback(new EncoderCallback(PACKET_TYPE_VIDEO));
-        videoEncoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-        videoEncoder.start();
+    private void cleanupEncoders() {
+        try { if (audioRecord != null) { if (audioRecord.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) audioRecord.stop(); audioRecord.release(); audioRecord = null; } } catch (Exception e) { usbLogViewModel.log("WARN: AudioRecord cleanup failed", e); }
+        try { if (videoEncoder != null) { videoEncoder.stop(); videoEncoder.release(); videoEncoder = null; } } catch (Exception e) { usbLogViewModel.log("WARN: Video encoder cleanup failed", e); }
+        try { if (audioEncoder != null) { audioEncoder.stop(); audioEncoder.release(); audioEncoder = null; } } catch (Exception e) { usbLogViewModel.log("WARN: Audio encoder cleanup failed", e); }
+        usbLogViewModel.log("Stream: Encoders cleaned up.");
     }
 
-    private void setupAudioEncoder() throws IOException {
-        MediaFormat format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_COUNT);
-        format.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC);
-        format.setInteger(MediaFormat.KEY_BIT_RATE, AUDIO_BITRATE);
-
-        audioEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC);
-        audioEncoder.setCallback(new EncoderCallback(PACKET_TYPE_AUDIO));
-        audioEncoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-        audioEncoder.start();
-    }
-
-    private class EncoderCallback extends MediaCodec.Callback {
-        private final byte packetType;
-        EncoderCallback(byte packetType) { this.packetType = packetType; }
-
-        @Override
-        public void onOutputBufferAvailable(@NonNull MediaCodec codec, int index, @NonNull MediaCodec.BufferInfo info) {
-            if (!isStreaming) return;
-            String targetIp = networkViewModel.getTargetIpAddress().getValue();
-            if (targetIp == null || targetIp.isEmpty()) return;
-
-            try {
-                ByteBuffer outputBuffer = codec.getOutputBuffer(index);
-                if (outputBuffer != null && info.size > 0) {
-                    byte[] data = new byte[info.size];
-                    outputBuffer.get(data);
-
-                    byte[] payload = new byte[1 + data.length];
-                    payload[0] = packetType;
-                    System.arraycopy(data, 0, payload, 1, data.length);
-
-                    udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_STREAM, payload);
-                }
-                codec.releaseOutputBuffer(index, false);
-            } catch (Exception e) {
-                usbLogViewModel.log("ERROR: Stream encoder output buffer failed", e);
-            }
-        }
-
-        @Override public void onInputBufferAvailable(@NonNull MediaCodec codec, int index) {}
-        @Override public void onError(@NonNull MediaCodec codec, @NonNull MediaCodec.CodecException e) { usbLogViewModel.log("ERROR: Stream Encoder error", e); }
-        @Override public void onOutputFormatChanged(@NonNull MediaCodec codec, @NonNull MediaFormat format) {}
-    }
+    // =========================================================================================
+    // WATCHING (RECEIVING) LOGIC
+    // =========================================================================================
 
     private void startWatching() {
         if (isWatching) return;
@@ -292,18 +289,14 @@ public class StreamFragment extends Fragment implements SurfaceHolder.Callback {
         }
 
         if (decodingSurface != null) {
-            try {
-                setupDecoders();
-            } catch (Exception e) {
-                usbLogViewModel.log("ERROR: Failed to setup decoders on watch start", e);
-                stopWatching();
-            }
+            startDecoding();
         }
     }
 
     private void stopWatching() {
         if (!isWatching) return;
         isWatching = false;
+        usbLogViewModel.log("Stream: Watching stopped.");
         cleanupDecoders();
         
         if(getActivity() != null) {
@@ -312,60 +305,71 @@ public class StreamFragment extends Fragment implements SurfaceHolder.Callback {
                 binding.decodedStreamView.setVisibility(View.GONE);
             });
         }
-        usbLogViewModel.log("Stream: Watching stopped.");
-    }
-    
-    private void cleanupDecoders() {
-        try { if (videoDecoder != null) { videoDecoder.stop(); videoDecoder.release(); videoDecoder = null; } } catch (Exception e) { usbLogViewModel.log("WARN: Video decoder cleanup failed", e); }
-        try { if (audioDecoder != null) { audioDecoder.stop(); audioDecoder.release(); audioDecoder = null; } } catch (Exception e) { usbLogViewModel.log("WARN: Audio decoder cleanup failed", e); }
-        try { if (audioTrack != null) { audioTrack.stop(); audioTrack.release(); audioTrack = null; } } catch (Exception e) { usbLogViewModel.log("WARN: Audio track cleanup failed", e); }
     }
 
     private void observeIncomingData() {
         udpViewModel.getReceivedMessage().observe(getViewLifecycleOwner(), message -> {
-            if (message == null || !isWatching || message.type != UdpViewModel.MESSAGE_TYPE_STREAM) return;
+            if (message == null || !isWatching) return;
+            // Offload to executor to avoid blocking LiveData thread
+            streamingExecutor.execute(() -> {
+                switch (message.type) {
+                    case UdpViewModel.MESSAGE_TYPE_STREAM_VIDEO_CONFIG:
+                    case UdpViewModel.MESSAGE_TYPE_STREAM_VIDEO_DATA:
+                        if (videoDecoder != null) feedDecoder(videoDecoder, message.payload, message.type == UdpViewModel.MESSAGE_TYPE_STREAM_VIDEO_CONFIG);
+                        break;
 
-            try {
-                ByteBuffer payload = ByteBuffer.wrap(message.payload);
-                if (payload.remaining() < 1) return;
-                byte streamType = payload.get();
-                byte[] data = new byte[payload.remaining()];
-                payload.get(data);
-
-                MediaCodec decoder = (streamType == PACKET_TYPE_VIDEO) ? videoDecoder : audioDecoder;
-                if (decoder == null) return;
-
-                int inIdx = decoder.dequeueInputBuffer(10000);
-                if (inIdx >= 0) {
-                    ByteBuffer inBuf = decoder.getInputBuffer(inIdx);
-                    if (inBuf != null) {
-                        inBuf.clear();
-                        inBuf.put(data);
-                        decoder.queueInputBuffer(inIdx, 0, data.length, System.nanoTime() / 1000, 0);
-                    }
+                    case UdpViewModel.MESSAGE_TYPE_STREAM_AUDIO_CONFIG:
+                    case UdpViewModel.MESSAGE_TYPE_STREAM_AUDIO_DATA:
+                        if (audioDecoder != null) feedDecoder(audioDecoder, message.payload, message.type == UdpViewModel.MESSAGE_TYPE_STREAM_AUDIO_CONFIG);
+                        break;
                 }
+            });
+        });
+    }
+    
+    private void feedDecoder(MediaCodec decoder, byte[] data, boolean isConfig) {
+        try {
+            int index = decoder.dequeueInputBuffer(-1);
+            if (index >= 0) {
+                ByteBuffer buffer = decoder.getInputBuffer(index);
+                buffer.clear();
+                buffer.put(data);
+                long presentationTime = (isConfig) ? 0 : System.nanoTime() / 1000;
+                int flags = (isConfig) ? MediaCodec.BUFFER_FLAG_CODEC_CONFIG : 0;
+                decoder.queueInputBuffer(index, 0, data.length, presentationTime, flags);
+            }
+        } catch (Exception e) {
+            usbLogViewModel.log("WARN: Failed to feed decoder", e);
+        }
+    }
+
+    private void startDecoding() {
+        streamingExecutor.execute(() -> {
+            try {
+                setupDecoders();
             } catch (Exception e) {
-                usbLogViewModel.log("WARN: Incoming stream data processing failed", e);
+                usbLogViewModel.log("ERROR: Failed to setup decoders on watch start", e);
+                if (getActivity() != null) getActivity().runOnUiThread(this::stopWatching);
             }
         });
     }
 
     private void setupDecoders() throws IOException {
-        if (decodingSurface == null) {
-            throw new IOException("Decoding surface is not available.");
-        }
-
+        if (decodingSurface == null) throw new IOException("Decoding surface is not available.");
         usbLogViewModel.log("Stream: Setting up decoders...");
+        
+        // Video Decoder
+        videoDecoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
         MediaFormat vFmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, VIDEO_WIDTH, VIDEO_HEIGHT);
-        videoDecoder = MediaCodec.createDecoderByType(vFmt.getString(MediaFormat.KEY_MIME));
-        videoDecoder.setCallback(new DecoderCallback(false));
+        videoDecoder.setCallback(new DecoderCallback(true));
         videoDecoder.configure(vFmt, decodingSurface, null, 0);
         videoDecoder.start();
 
+        // Audio Decoder
+        audioDecoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_AAC);
         int aChanCfg = (AUDIO_CHANNEL_COUNT == 1) ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
         MediaFormat aFmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_COUNT);
-        audioDecoder = MediaCodec.createDecoderByType(aFmt.getString(MediaFormat.KEY_MIME));
-        audioDecoder.setCallback(new DecoderCallback(true));
+        audioDecoder.setCallback(new DecoderCallback(false));
         audioDecoder.configure(aFmt, null, null, 0);
         audioDecoder.start();
 
@@ -378,17 +382,118 @@ public class StreamFragment extends Fragment implements SurfaceHolder.Callback {
         usbLogViewModel.log("Stream: Decoders and AudioTrack are ready.");
     }
 
+    private void cleanupDecoders() {
+        try { if (videoDecoder != null) { videoDecoder.stop(); videoDecoder.release(); videoDecoder = null; } } catch (Exception e) { usbLogViewModel.log("WARN: Video decoder cleanup failed", e); }
+        try { if (audioDecoder != null) { audioDecoder.stop(); audioDecoder.release(); audioDecoder = null; } } catch (Exception e) { usbLogViewModel.log("WARN: Audio decoder cleanup failed", e); }
+        try { if (audioTrack != null) { if (audioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) audioTrack.stop(); audioTrack.release(); audioTrack = null; } } catch (Exception e) { usbLogViewModel.log("WARN: Audio track cleanup failed", e); }
+        usbLogViewModel.log("Stream: Decoders cleaned up.");
+    }
+
+    // =========================================================================================
+    // CODEC CALLBACKS (Used for both encoding and decoding)
+    // =========================================================================================
+
+    private class EncoderCallback extends MediaCodec.Callback {
+        private final boolean isVideo;
+
+        EncoderCallback(boolean isVideo) {
+            this.isVideo = isVideo;
+        }
+
+        @Override
+        public void onInputBufferAvailable(@NonNull MediaCodec codec, int index) { /* Not used in encoder for this setup */ }
+
+        @Override
+        public void onOutputBufferAvailable(@NonNull MediaCodec codec, int index, @NonNull MediaCodec.BufferInfo info) {
+            if (!isStreaming) return;
+            try {
+                ByteBuffer outputBuffer = codec.getOutputBuffer(index);
+                if (outputBuffer != null && info.size > 0) {
+                    byte packetType;
+                    if (isVideo) {
+                        packetType = (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0 ? UdpViewModel.MESSAGE_TYPE_STREAM_VIDEO_CONFIG : UdpViewModel.MESSAGE_TYPE_STREAM_VIDEO_DATA;
+                    } else {
+                        packetType = (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0 ? UdpViewModel.MESSAGE_TYPE_STREAM_AUDIO_CONFIG : UdpViewModel.MESSAGE_TYPE_STREAM_AUDIO_DATA;
+                    }
+                    
+                    byte[] data = new byte[info.size];
+                    outputBuffer.get(data);
+
+                    String targetIp = networkViewModel.getTargetIpAddress().getValue();
+                    if (targetIp != null && !targetIp.isEmpty()) {
+                         udpViewModel.sendData(targetIp, packetType, data);
+                    }
+                }
+                codec.releaseOutputBuffer(index, false);
+            } catch (Exception e) {
+                usbLogViewModel.log("ERROR: " + (isVideo ? "Video" : "Audio") + " encoder output processing failed", e);
+            }
+        }
+
+        @Override
+        public void onError(@NonNull MediaCodec codec, @NonNull MediaCodec.CodecException e) {
+            usbLogViewModel.log("ERROR: " + (isVideo ? "Video" : "Audio") + " Encoder onError", e);
+        }
+
+        @Override
+        public void onOutputFormatChanged(@NonNull MediaCodec codec, @NonNull MediaFormat format) {
+            usbLogViewModel.log("INFO: " + (isVideo ? "Video" : "Audio") + " Encoder format changed: " + format);
+        }
+    }
+
+    private class DecoderCallback extends MediaCodec.Callback {
+        private final boolean isVideo;
+
+        DecoderCallback(boolean isVideo) {
+            this.isVideo = isVideo;
+        }
+
+        @Override
+        public void onInputBufferAvailable(@NonNull MediaCodec codec, int index) { /* Not used in decoder for this setup */ }
+
+        @Override
+        public void onOutputBufferAvailable(@NonNull MediaCodec codec, int index, @NonNull MediaCodec.BufferInfo info) {
+            if (!isWatching) return;
+
+            try {
+                 if (isVideo) {
+                    // The key change is here: we now render every frame.
+                    codec.releaseOutputBuffer(index, true);
+                 } else {
+                    ByteBuffer outBuf = codec.getOutputBuffer(index);
+                    if (outBuf != null && info.size > 0 && audioTrack != null && audioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                        byte[] chunk = new byte[info.size];
+                        outBuf.get(chunk);
+                        audioTrack.write(chunk, 0, info.size);
+                    }
+                    codec.releaseOutputBuffer(index, false);
+                }
+            } catch (Exception e) {
+                 usbLogViewModel.log("WARN: " + (isVideo ? "Video" : "Audio") + " decoder output processing failed", e);
+            }
+        }
+
+        @Override
+        public void onError(@NonNull MediaCodec codec, @NonNull MediaCodec.CodecException e) {
+            usbLogViewModel.log("ERROR: " + (isVideo ? "Video" : "Audio") + " Decoder onError", e);
+        }
+
+        @Override
+        public void onOutputFormatChanged(@NonNull MediaCodec codec, @NonNull MediaFormat format) {
+             usbLogViewModel.log("INFO: " + (isVideo ? "Video" : "Audio") + " Decoder format changed: " + format);
+        }
+    }
+
+    // =========================================================================================
+    // SURFACEHOLDER CALLBACKS
+    // =========================================================================================
+
     @Override
     public void surfaceCreated(@NonNull SurfaceHolder holder) {
         usbLogViewModel.log("Stream: Decoding surface created.");
         this.decodingSurface = holder.getSurface();
         if (isWatching) {
-            try {
-                setupDecoders();
-            } catch (Exception e) {
-                usbLogViewModel.log("ERROR: Failed to setup decoders on surfaceCreated", e);
-                if(getActivity() != null) getActivity().runOnUiThread(this::stopWatching);
-            }
+            startDecoding();
         }
     }
 
@@ -398,36 +503,8 @@ public class StreamFragment extends Fragment implements SurfaceHolder.Callback {
     @Override
     public void surfaceDestroyed(@NonNull SurfaceHolder holder) {
         usbLogViewModel.log("Stream: Decoding surface destroyed.");
-        cleanupDecoders();
         this.decodingSurface = null;
-    }
-
-    private class DecoderCallback extends MediaCodec.Callback {
-        private final boolean isAudio;
-        DecoderCallback(boolean isAudio) { this.isAudio = isAudio; }
-
-        @Override
-        public void onOutputBufferAvailable(@NonNull MediaCodec codec, int index, @NonNull MediaCodec.BufferInfo info) {
-            try {
-                 if (isAudio) {
-                    ByteBuffer outBuf = codec.getOutputBuffer(index);
-                    if (outBuf != null && info.size > 0 && audioTrack != null && audioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
-                        byte[] chunk = new byte[info.size];
-                        outBuf.get(chunk);
-                        audioTrack.write(chunk, 0, info.size);
-                    }
-                    codec.releaseOutputBuffer(index, false);
-                } else {
-                    codec.releaseOutputBuffer(index, true);
-                }
-            } catch (Exception e) {
-                usbLogViewModel.log("ERROR: Stream decoder output buffer failed", e);
-            }
-        }
-
-        @Override public void onInputBufferAvailable(@NonNull MediaCodec codec, int index) {}
-        @Override public void onError(@NonNull MediaCodec codec, @NonNull MediaCodec.CodecException e) { usbLogViewModel.log("ERROR: Stream Decoder error", e); }
-        @Override public void onOutputFormatChanged(@NonNull MediaCodec codec, @NonNull MediaFormat format) {}
+        stopWatching();
     }
 
     @Override

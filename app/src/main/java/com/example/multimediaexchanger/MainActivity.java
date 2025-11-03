@@ -6,13 +6,10 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
-import android.content.res.ColorStateList;
 import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 import android.provider.Settings;
 import android.view.WindowManager;
 
@@ -42,10 +39,6 @@ public class MainActivity extends AppCompatActivity {
     private UsbLogViewModel usbLogViewModel;
     private UdpViewModel udpViewModel;
     private NetworkViewModel networkViewModel;
-
-    private final Handler discoveryHandler = new Handler(Looper.getMainLooper());
-    private Runnable discoveryRunnable;
-    private static final long DISCOVERY_INTERVAL_MS = 5000; // 5 seconds
 
     private static final int PERMISSIONS_REQUEST_CODE = 123;
 
@@ -89,10 +82,9 @@ public class MainActivity extends AppCompatActivity {
         udpViewModel = new ViewModelProvider(this).get(UdpViewModel.class);
         networkViewModel = new ViewModelProvider(this).get(NetworkViewModel.class);
 
-        // FIXED: Set the logger instance for all ViewModels that need it
+        // Set the logger instance for all ViewModels that need it
         udpViewModel.setLogger(usbLogViewModel);
         networkViewModel.setLogger(usbLogViewModel);
-        // --------------------------------
         
         usbLogViewModel.log("----------------------------------");
         usbLogViewModel.log("            APP STARTED            ");
@@ -112,25 +104,27 @@ public class MainActivity extends AppCompatActivity {
 
         NavigationUI.setupWithNavController(binding.navView, navController);
 
-        startDiscoveryBroadcast();
+        // Observe incoming calls to switch to the calls tab
+        observeCallRequests(navController, binding.navView);
     }
 
-    private void startDiscoveryBroadcast() {
-        discoveryRunnable = () -> {
-            String rawIp = networkViewModel.getRawDeviceIpAddress().getValue();
-            if (rawIp != null && !rawIp.isEmpty()) {
-                udpViewModel.broadcastDiscovery(rawIp);
+    private void observeCallRequests(NavController navController, BottomNavigationView navView) {
+        udpViewModel.getReceivedMessage().observe(this, message -> {
+            if (message != null && message.type == UdpViewModel.MESSAGE_TYPE_CALL_REQUEST) {
+                // Check if we are not already on the calls screen
+                if (navController.getCurrentDestination() != null && navController.getCurrentDestination().getId() != R.id.navigation_calls) {
+                    usbLogViewModel.log("System: Incoming call detected, switching to Calls tab.");
+                    // This is the key change: select the tab directly
+                    navView.setSelectedItemId(R.id.navigation_calls);
+                }
             }
-            discoveryHandler.postDelayed(discoveryRunnable, DISCOVERY_INTERVAL_MS);
-        };
-        discoveryHandler.post(discoveryRunnable);
+        });
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
         unregisterReceiver(powerConnectionReceiver);
-        discoveryHandler.removeCallbacks(discoveryRunnable);
         usbLogViewModel.log("----------------------------------");
         usbLogViewModel.log("             APP CLOSED             ");
         usbLogViewModel.log("----------------------------------");

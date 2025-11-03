@@ -48,21 +48,58 @@ public class UsbLogViewModel extends AndroidViewModel {
         isConnected.postValue(connected);
     }
 
-    // ADDED: Overloaded method to log exceptions with full stack trace
     public synchronized void log(String message, Throwable tr) {
         log(message + "\n" + Log.getStackTraceString(tr));
     }
 
     public synchronized void log(String message) {
-        String timestamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
-        String logMessage = timestamp + ": " + message;
+        StackTraceElement[] stackTrace = new Throwable().getStackTrace();
+        String callerInfo = "";
+        if (stackTrace.length > 1) {
+            for (int i = 1; i < stackTrace.length; i++) {
+                StackTraceElement element = stackTrace[i];
+                String className = element.getClassName();
+                if (!className.equals(UsbLogViewModel.class.getName())) {
+                    String simpleClassName = className.substring(className.lastIndexOf('.') + 1);
+                    int dollarSign = simpleClassName.indexOf('$');
+                    if (dollarSign != -1) {
+                        simpleClassName = simpleClassName.substring(0, dollarSign);
+                    }
+                    callerInfo = "[" + simpleClassName + "." + element.getMethodName() + "] ";
+                    break;
+                }
+            }
+        }
 
-        // Update UI
+        String timestamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
+        String logMessage = timestamp + ": " + callerInfo + message;
+
         logBuilder.append(logMessage).append("\n");
         logs.postValue(logBuilder.toString());
 
-        // Write to file in background
         writeLogToFile(logMessage + "\n");
+    }
+
+    public void clearLogs() {
+        fileExecutor.execute(() -> {
+            logBuilder.setLength(0);
+            logs.postValue("");
+            if (logFile.exists()) {
+                try {
+                    if (logFile.delete()) {
+                        if (logFile.createNewFile()) {
+                            Log.d(TAG, "Log file cleared and recreated.");
+                        } else {
+                             Log.e(TAG, "Failed to recreate log file.");
+                        }
+                    } else {
+                        Log.e(TAG, "Failed to delete log file.");
+                    }
+                } catch (IOException e) {
+                    Log.e(TAG, "Error managing log file for clearing.", e);
+                }
+            }
+        });
     }
 
     private void loadLogsFromFile() {
@@ -84,11 +121,10 @@ public class UsbLogViewModel extends AndroidViewModel {
 
     private void writeLogToFile(String logMessage) {
         fileExecutor.execute(() -> {
-            try (FileOutputStream fos = new FileOutputStream(logFile, true); // true for append mode
+            try (FileOutputStream fos = new FileOutputStream(logFile, true);
                  OutputStreamWriter writer = new OutputStreamWriter(fos)) {
                 writer.append(logMessage);
             } catch (IOException e) {
-                // If our own logger fails, fall back to Android's default Log
                 Log.e(TAG, "FATAL: Error writing log to file", e);
             }
         });
