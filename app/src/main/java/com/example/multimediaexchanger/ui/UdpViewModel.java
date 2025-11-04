@@ -6,6 +6,8 @@ import androidx.lifecycle.AndroidViewModel;
 import androidx.lifecycle.LiveData;
 import androidx.lifecycle.MutableLiveData;
 
+import com.example.multimediaexchanger.ui.network.NetworkViewModel;
+
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -32,6 +34,7 @@ public class UdpViewModel extends AndroidViewModel {
     private final MutableLiveData<UdpMessage> receivedMessage = new MutableLiveData<>();
     private final MutableLiveData<String> discoveredIpEvent = new MutableLiveData<>();
     private UsbLogViewModel logger;
+    private NetworkViewModel networkViewModel;
 
     private DatagramSocket socket;
     private final ExecutorService executorService = Executors.newCachedThreadPool();
@@ -51,14 +54,13 @@ public class UdpViewModel extends AndroidViewModel {
     public static final byte MESSAGE_TYPE_CALL_ACCEPT = 0x11;
     public static final byte MESSAGE_TYPE_CALL_REJECT = 0x12;
     public static final byte MESSAGE_TYPE_CALL_END = 0x13;
-    public static final byte MESSAGE_TYPE_CALL_AUDIO = 0x14; // Renamed from STREAM
+    public static final byte MESSAGE_TYPE_CALL_AUDIO = 0x14;
 
     // Stream Signaling Message Types
     public static final byte MESSAGE_TYPE_STREAM_VIDEO_CONFIG = 0x20;
     public static final byte MESSAGE_TYPE_STREAM_VIDEO_DATA = 0x21;
     public static final byte MESSAGE_TYPE_STREAM_AUDIO_CONFIG = 0x22;
     public static final byte MESSAGE_TYPE_STREAM_AUDIO_DATA = 0x23;
-
 
     public UdpViewModel(@NonNull Application application) {
         super(application);
@@ -69,16 +71,16 @@ public class UdpViewModel extends AndroidViewModel {
         startUdpSocket();
     }
 
+    public void setNetworkViewModel(NetworkViewModel networkViewModel) {
+        this.networkViewModel = networkViewModel;
+    }
+
     private void log(String message) {
-        if (logger != null) {
-            logger.log(message);
-        }
+        if (logger != null) logger.log(message);
     }
 
     private void log(String message, Throwable tr) {
-        if (logger != null) {
-            logger.log(message, tr);
-        }
+        if (logger != null) logger.log(message, tr);
     }
 
     public LiveData<UdpMessage> getReceivedMessage() {
@@ -91,7 +93,7 @@ public class UdpViewModel extends AndroidViewModel {
 
     private void startUdpSocket() {
         if (isRunning) {
-            log("UDP: Socket listener is already running.");
+            log("UDP: Socket listener already running.");
             return;
         }
         isRunning = true;
@@ -115,22 +117,19 @@ public class UdpViewModel extends AndroidViewModel {
                             byte[] payload = new byte[length];
                             System.arraycopy(packet.getData(), 1, payload, 0, length);
 
-                            log("UDP: RX: Received " + packet.getLength() + " bytes from " + senderIp + " of type " + String.format("0x%02X", messageType));
+                            log("UDP: RX: Received " + packet.getLength() + " bytes from " + senderIp + " type " + String.format("0x%02X", messageType));
 
-                            switch(messageType){
-                                case MESSAGE_TYPE_HANDSHAKE:
-                                    log("UDP: RX: Handshake received from " + senderIp);
-                                    discoveredIpEvent.postValue(senderIp);
-                                    byte[] response = "Соединение установлено!".getBytes(StandardCharsets.UTF_8);
-                                    sendData(senderIp, MESSAGE_TYPE_TEXT, response);
-                                    break;
-                                default:
-                                    receivedMessage.postValue(new UdpMessage(messageType, payload, senderIp));
-                                    break;
+                            if (messageType == MESSAGE_TYPE_HANDSHAKE) {
+                                log("UDP: RX: Handshake from " + senderIp);
+                                discoveredIpEvent.postValue(senderIp);
+                                byte[] response = "Соединение установлено!".getBytes(StandardCharsets.UTF_8);
+                                sendData(senderIp, MESSAGE_TYPE_TEXT, response);
+                            } else {
+                                receivedMessage.postValue(new UdpMessage(messageType, payload, senderIp));
                             }
                         }
                     } catch (IOException e) {
-                        if (isRunning) log("ERROR: UDP receive error", e);
+                        if (isRunning) log("ERROR: UDP receive failed", e);
                     }
                 }
             } catch (SocketException e) {
@@ -144,30 +143,37 @@ public class UdpViewModel extends AndroidViewModel {
     public void sendData(String ipAddress, byte messageType, byte[] data) {
         executorService.execute(() -> {
             if (socket == null || socket.isClosed()) {
-                log("ERROR: Cannot send data, socket is not ready.");
+                log("ERROR: Cannot send, socket not ready.");
                 return;
             }
+
+            // Получаем IP USB-интерфейса из NetworkViewModel, если он есть
+            String targetIp = ipAddress;
+            if (networkViewModel != null && networkViewModel.getTargetIpAddress().getValue() != null) {
+                targetIp = networkViewModel.getTargetIpAddress().getValue();
+            }
+
             try {
-                InetAddress address = InetAddress.getByName(ipAddress);
+                InetAddress address = InetAddress.getByName(targetIp);
                 byte[] message = new byte[data.length + 1];
                 message[0] = messageType;
                 System.arraycopy(data, 0, message, 1, data.length);
 
                 DatagramPacket packet = new DatagramPacket(message, message.length, address, LISTEN_PORT);
                 socket.send(packet);
-                log("UDP: TX: Sent " + message.length + " bytes of type " + String.format("0x%02X", messageType) + " to " + ipAddress);
+                log("UDP: TX: Sent " + message.length + " bytes type " + String.format("0x%02X", messageType) + " to " + targetIp);
             } catch (Exception e) {
-                log("ERROR: UDP send packet failed to " + ipAddress, e);
+                log("ERROR: UDP send failed to " + targetIp, e);
             }
         });
     }
-    
+
     public void sendHandshake(String ipAddress) {
         log("UDP: Queuing handshake to " + ipAddress);
         sendData(ipAddress, MESSAGE_TYPE_HANDSHAKE, new byte[0]);
     }
 
-    private void closeSocket(){
+    private void closeSocket() {
         if (socket != null && !socket.isClosed()) {
             socket.close();
             socket = null;
@@ -179,8 +185,8 @@ public class UdpViewModel extends AndroidViewModel {
     protected void onCleared() {
         super.onCleared();
         isRunning = false;
-        closeSocket(); 
-        if (executorService != null && !executorService.isShutdown()) {
+        closeSocket();
+        if (!executorService.isShutdown()) {
             executorService.shutdown();
             log("UDP: Executor service shut down.");
         }

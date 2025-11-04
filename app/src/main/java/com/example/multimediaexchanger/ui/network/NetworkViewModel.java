@@ -4,7 +4,6 @@ import android.app.Application;
 import androidx.lifecycle.AndroidViewModel;
 import androidx.lifecycle.LiveData;
 import androidx.lifecycle.MutableLiveData;
-
 import com.example.multimediaexchanger.ui.UsbLogViewModel;
 
 import java.net.Inet4Address;
@@ -35,15 +34,11 @@ public class NetworkViewModel extends AndroidViewModel {
     }
 
     private void log(String message) {
-        if (logger != null) {
-            logger.log(message);
-        }
+        if (logger != null) logger.log(message);
     }
 
     private void log(String message, Throwable tr) {
-        if (logger != null) {
-            logger.log(message, tr);
-        }
+        if (logger != null) logger.log(message, tr);
     }
 
     public LiveData<String> getDeviceIpAddress() {
@@ -71,17 +66,16 @@ public class NetworkViewModel extends AndroidViewModel {
             try {
                 Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
                 for (NetworkInterface intf : Collections.list(interfaces)) {
+                    String name = intf.getName();
                     for (InetAddress addr : Collections.list(intf.getInetAddresses())) {
                         if (!addr.isLoopbackAddress() && addr instanceof Inet4Address) {
                             String hostAddress = addr.getHostAddress();
-                            log("Net: Found IP: " + hostAddress + " on interface: " + intf.getName());
-                            
-                            boolean isUsbInterface = intf.getName().contains("rndis") || intf.getName().contains("usb");
+                            boolean isUsb = name.contains("rndis") || name.contains("usb");
 
-                            if (isUsbInterface) {
-                                if (usbIp == null || !hostAddress.endsWith(".1")) {
-                                    usbIp = hostAddress;
-                                }
+                            log("Net: Found " + hostAddress + " on " + name + (isUsb ? " [USB]" : ""));
+
+                            if (isUsb) {
+                                usbIp = hostAddress;
                             } else if (rawIp == null) {
                                 rawIp = hostAddress;
                             }
@@ -94,13 +88,17 @@ public class NetworkViewModel extends AndroidViewModel {
                     formattedIp = "Мой IP (USB): " + rawIp;
                 } else if (rawIp != null) {
                     formattedIp = "Мой IP: " + rawIp;
+                } else {
+                    rawIp = "127.0.0.1";
+                    formattedIp = "Мой IP (USB): 127.0.0.1";
                 }
 
             } catch (SocketException e) {
                 log("ERROR: Finding IP failed", e);
                 formattedIp = "Ошибка поиска IP";
+                rawIp = "127.0.0.1";
             }
-            
+
             log("Net: Final selected IP: " + rawIp);
             deviceIpAddress.postValue(formattedIp);
             rawDeviceIpAddress.postValue(rawIp);
@@ -110,8 +108,6 @@ public class NetworkViewModel extends AndroidViewModel {
     @Override
     protected void onCleared() {
         super.onCleared();
-        if (executorService != null && !executorService.isShutdown()) {
-            executorService.shutdown();
-        }
+        if (!executorService.isShutdown()) executorService.shutdown();
     }
 }
