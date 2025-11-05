@@ -9,8 +9,6 @@ import android.text.method.ScrollingMovementMethod;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.Button;
-import android.widget.EditText;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -43,38 +41,47 @@ public class NetworkFragment extends Fragment {
         final TextView logTextView = binding.logTextView;
         final ScrollView logScrollView = binding.logScrollView;
 
-        // Make the TextView scrollable
         logTextView.setMovementMethod(new ScrollingMovementMethod());
 
-        // Observer for device's own IP
         networkViewModel.getDeviceIpAddress().observe(getViewLifecycleOwner(), binding.myIpAddressText::setText);
 
-        // Observer for connection status
         networkViewModel.getTargetIpAddress().observe(getViewLifecycleOwner(), targetIp -> {
-            if (targetIp != null && !targetIp.isEmpty()) {
-                binding.connectionStatusText.setText("Подключено к: " + targetIp);
-                binding.connectionStatusText.setBackgroundColor(Color.parseColor("#388E3C")); // Green
-            } else {
+            if (targetIp == null || targetIp.isEmpty()) {
                 binding.connectionStatusText.setText("Нет подключения");
-                binding.connectionStatusText.setBackgroundColor(Color.parseColor("#D32F2F")); // Red
+                binding.connectionStatusText.setBackgroundColor(Color.parseColor("#D32F2F"));
+            } else {
+                binding.connectionStatusText.setText("Подключение...");
+                binding.connectionStatusText.setBackgroundColor(Color.parseColor("#FBC02D"));
             }
         });
 
-        // Observer for logs with auto-scroll
+        udpViewModel.getHandshakeEvent().observe(getViewLifecycleOwner(), handshakeIp -> {
+            if (handshakeIp != null && !handshakeIp.isEmpty()) {
+                binding.connectionStatusText.setText("Подключено к: " + handshakeIp);
+                binding.connectionStatusText.setBackgroundColor(Color.parseColor("#388E3C"));
+                Toast.makeText(getContext(), "USB соединение установлено", Toast.LENGTH_SHORT).show();
+            }
+        });
+
         usbLogViewModel.getLogs().observe(getViewLifecycleOwner(), logText -> {
             logTextView.setText(logText);
-            // Post a runnable to scroll down, which will be executed after the layout pass
             logScrollView.post(() -> logScrollView.fullScroll(View.FOCUS_DOWN));
         });
 
-        // Listener for discovered peers - This now ONLY logs, no auto-connect action
         udpViewModel.getDiscoveredIpEvent().observe(getViewLifecycleOwner(), discoveredIp -> {
             if (discoveredIp != null && !discoveredIp.equals(networkViewModel.getRawDeviceIpAddress().getValue())) {
                 usbLogViewModel.log("Net: Peer discovered at " + discoveredIp + ". You can connect manually.");
             }
         });
 
-        // Click listener for the connect button
+        // ← новое наблюдение за ошибкой сокета
+        udpViewModel.getSocketErrorEvent().observe(getViewLifecycleOwner(), error -> {
+            if (error != null && error.equals("Socket недоступен")) {
+                binding.connectionStatusText.setText("Нет подключения");
+                binding.connectionStatusText.setBackgroundColor(Color.parseColor("#D32F2F")); // красный
+            }
+        });
+
         binding.connectButton.setOnClickListener(v -> {
             String ip = binding.ipAddressInput.getText().toString();
             if (!ip.isEmpty() && ip.contains(".")) {
@@ -86,7 +93,6 @@ public class NetworkFragment extends Fragment {
             }
         });
 
-        // Click listener for the copy logs button to copy the last 100 lines
         binding.copyLogsButton.setOnClickListener(v -> {
             String allLogs = logTextView.getText().toString();
             String[] lines = allLogs.split("\n");
@@ -95,14 +101,12 @@ public class NetworkFragment extends Fragment {
             for (int i = start; i < lines.length; i++) {
                 last100Lines.append(lines[i]).append("\n");
             }
-
             ClipboardManager clipboard = (ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
             ClipData clip = ClipData.newPlainText("Last 100 Logs", last100Lines.toString());
             clipboard.setPrimaryClip(clip);
             Toast.makeText(getContext(), "Последние 100 строк логов скопированы", Toast.LENGTH_SHORT).show();
         });
 
-        // Click listener for the clear logs button
         binding.clearLogsButton.setOnClickListener(v -> {
             usbLogViewModel.clearLogs();
             Toast.makeText(getContext(), "Логи очищены", Toast.LENGTH_SHORT).show();

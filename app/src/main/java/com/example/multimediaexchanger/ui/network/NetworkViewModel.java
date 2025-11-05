@@ -1,9 +1,18 @@
 package com.example.multimediaexchanger.ui.network;
 
 import android.app.Application;
+import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkInfo;
+import android.net.NetworkRequest;
+
+import androidx.annotation.NonNull;
 import androidx.lifecycle.AndroidViewModel;
 import androidx.lifecycle.LiveData;
 import androidx.lifecycle.MutableLiveData;
+
 import com.example.multimediaexchanger.ui.UsbLogViewModel;
 
 import java.net.Inet4Address;
@@ -23,9 +32,11 @@ public class NetworkViewModel extends AndroidViewModel {
     private UsbLogViewModel logger;
 
     private final ExecutorService executorService = Executors.newSingleThreadExecutor();
+    private Network usbNetwork;
 
     public NetworkViewModel(Application application) {
         super(application);
+        findUsbNetwork(application);
     }
 
     public void setLogger(UsbLogViewModel logger) {
@@ -33,28 +44,34 @@ public class NetworkViewModel extends AndroidViewModel {
         findDeviceIp();
     }
 
-    private void log(String message) {
-        if (logger != null) logger.log(message);
-    }
+    private void log(String msg) { if (logger != null) logger.log(msg); }
 
-    private void log(String message, Throwable tr) {
-        if (logger != null) logger.log(message, tr);
-    }
+    public LiveData<String> getDeviceIpAddress() { return deviceIpAddress; }
+    public LiveData<String> getRawDeviceIpAddress() { return rawDeviceIpAddress; }
+    public LiveData<String> getTargetIpAddress() { return targetIpAddress; }
+    public void setTargetIpAddress(String ip) { targetIpAddress.setValue(ip); }
 
-    public LiveData<String> getDeviceIpAddress() {
-        return deviceIpAddress;
-    }
+    public Network getUsbNetwork() { return usbNetwork; }
 
-    public LiveData<String> getRawDeviceIpAddress() {
-        return rawDeviceIpAddress;
-    }
+    private void findUsbNetwork(Application app) {
+        ConnectivityManager cm = (ConnectivityManager) app.getSystemService(Application.CONNECTIVITY_SERVICE);
+        if (cm == null) return;
 
-    public LiveData<String> getTargetIpAddress() {
-        return targetIpAddress;
-    }
+        for (Network network : cm.getAllNetworks()) {
+            NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+            LinkProperties props = cm.getLinkProperties(network);
 
-    public void setTargetIpAddress(String ip) {
-        targetIpAddress.setValue(ip);
+            if (caps != null && props != null && props.getInterfaceName() != null) {
+                String iface = props.getInterfaceName();
+                if (iface.contains("rndis") || iface.contains("usb")) {
+                    usbNetwork = network;
+                    log("Net: Found USB network interface: " + iface);
+                    return;
+                }
+            }
+        }
+
+        log("WARNING: USB network not found, fallback to default network.");
     }
 
     private void findDeviceIp() {
@@ -74,11 +91,8 @@ public class NetworkViewModel extends AndroidViewModel {
 
                             log("Net: Found " + hostAddress + " on " + name + (isUsb ? " [USB]" : ""));
 
-                            if (isUsb) {
-                                usbIp = hostAddress;
-                            } else if (rawIp == null) {
-                                rawIp = hostAddress;
-                            }
+                            if (isUsb) usbIp = hostAddress;
+                            else if (rawIp == null) rawIp = hostAddress;
                         }
                     }
                 }
@@ -94,7 +108,7 @@ public class NetworkViewModel extends AndroidViewModel {
                 }
 
             } catch (SocketException e) {
-                log("ERROR: Finding IP failed", e);
+                log("ERROR: Finding IP failed: " + e.getMessage());
                 formattedIp = "Ошибка поиска IP";
                 rawIp = "127.0.0.1";
             }
