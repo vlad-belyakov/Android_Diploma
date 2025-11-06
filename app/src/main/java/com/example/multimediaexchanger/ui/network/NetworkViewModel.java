@@ -5,10 +5,7 @@ import android.net.ConnectivityManager;
 import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
-import android.net.NetworkInfo;
-import android.net.NetworkRequest;
 
-import androidx.annotation.NonNull;
 import androidx.lifecycle.AndroidViewModel;
 import androidx.lifecycle.LiveData;
 import androidx.lifecycle.MutableLiveData;
@@ -63,15 +60,15 @@ public class NetworkViewModel extends AndroidViewModel {
 
             if (caps != null && props != null && props.getInterfaceName() != null) {
                 String iface = props.getInterfaceName();
-                if (iface.contains("rndis") || iface.contains("usb")) {
+                if (iface.contains("rndis") || iface.contains("usb") || iface.contains("eth") || iface.contains("rnnet")) {
                     usbNetwork = network;
-                    log("Net: Found USB network interface: " + iface);
+                    log("Net: Found interface: " + iface + " [USB/Ethernet]");
                     return;
                 }
             }
         }
 
-        log("WARNING: USB network not found, fallback to default network.");
+        log("WARNING: USB/Ethernet network not found, fallback to default network.");
     }
 
     private void findDeviceIp() {
@@ -84,14 +81,23 @@ public class NetworkViewModel extends AndroidViewModel {
                 Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
                 for (NetworkInterface intf : Collections.list(interfaces)) {
                     String name = intf.getName();
+
+                    // 🔒 Wi-Fi интерфейсы игнорируем
+                    if (name.contains("wlan") || name.contains("wifi") || name.contains("p2p") || name.contains("radio")) {
+                        log("Net: Skipped Wi-Fi interface: " + name);
+                        continue;
+                    }
+
                     for (InetAddress addr : Collections.list(intf.getInetAddresses())) {
                         if (!addr.isLoopbackAddress() && addr instanceof Inet4Address) {
                             String hostAddress = addr.getHostAddress();
                             boolean isUsb = name.contains("rndis") || name.contains("usb");
+                            boolean isEthernet = name.contains("eth") || name.contains("rnnet");
 
-                            log("Net: Found " + hostAddress + " on " + name + (isUsb ? " [USB]" : ""));
+                            log("Net: Found " + hostAddress + " on " + name +
+                                    (isUsb ? " [USB]" : isEthernet ? " [Ethernet]" : ""));
 
-                            if (isUsb) usbIp = hostAddress;
+                            if (isUsb || isEthernet) usbIp = hostAddress;
                             else if (rawIp == null) rawIp = hostAddress;
                         }
                     }
@@ -99,12 +105,12 @@ public class NetworkViewModel extends AndroidViewModel {
 
                 if (usbIp != null) {
                     rawIp = usbIp;
-                    formattedIp = "Мой IP (USB): " + rawIp;
+                    formattedIp = "Мой IP (USB/Ethernet): " + rawIp;
                 } else if (rawIp != null) {
                     formattedIp = "Мой IP: " + rawIp;
                 } else {
                     rawIp = "127.0.0.1";
-                    formattedIp = "Мой IP (USB): 127.0.0.1";
+                    formattedIp = "Мой IP (loopback): 127.0.0.1";
                 }
 
             } catch (SocketException e) {

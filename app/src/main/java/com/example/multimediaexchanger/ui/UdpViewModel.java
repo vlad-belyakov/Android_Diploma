@@ -22,10 +22,6 @@ import java.util.Enumeration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/**
- * UDP ViewModel, работающий через USB (rndis/usb интерфейс).
- * Вся передача данных и сообщений между Android устройствами идёт через локальную USB-сеть.
- */
 public class UdpViewModel extends AndroidViewModel {
 
     public static class UdpMessage {
@@ -43,7 +39,7 @@ public class UdpViewModel extends AndroidViewModel {
     private final MutableLiveData<UdpMessage> receivedMessage = new MutableLiveData<>();
     private final MutableLiveData<String> discoveredIpEvent = new MutableLiveData<>();
     private final MutableLiveData<String> handshakeEvent = new MutableLiveData<>();
-    private final MutableLiveData<String> socketErrorEvent = new MutableLiveData<>(); // ← новое
+    private final MutableLiveData<String> socketErrorEvent = new MutableLiveData<>();
 
     private UsbLogViewModel logger;
 
@@ -53,7 +49,6 @@ public class UdpViewModel extends AndroidViewModel {
 
     private static final int LISTEN_PORT = 12345;
 
-    // Типы сообщений
     public static final byte MESSAGE_TYPE_TEXT = 0x01;
     public static final byte MESSAGE_TYPE_FILE_HEADER = 0x02;
     public static final byte MESSAGE_TYPE_FILE_CHUNK = 0x03;
@@ -87,7 +82,7 @@ public class UdpViewModel extends AndroidViewModel {
     private void log(String message) {
         if (logger != null) logger.log(message);
         if (message.contains("ERROR: Socket недоступен")) {
-            socketErrorEvent.postValue("Socket недоступен"); // ← постим событие ошибки
+            socketErrorEvent.postValue("Socket недоступен");
         }
     }
 
@@ -95,21 +90,10 @@ public class UdpViewModel extends AndroidViewModel {
         if (logger != null) logger.log(message, tr);
     }
 
-    public LiveData<UdpMessage> getReceivedMessage() {
-        return receivedMessage;
-    }
-
-    public LiveData<String> getDiscoveredIpEvent() {
-        return discoveredIpEvent;
-    }
-
-    public LiveData<String> getHandshakeEvent() {
-        return handshakeEvent;
-    }
-
-    public LiveData<String> getSocketErrorEvent() {
-        return socketErrorEvent; // ← новое
-    }
+    public LiveData<UdpMessage> getReceivedMessage() { return receivedMessage; }
+    public LiveData<String> getDiscoveredIpEvent() { return discoveredIpEvent; }
+    public LiveData<String> getHandshakeEvent() { return handshakeEvent; }
+    public LiveData<String> getSocketErrorEvent() { return socketErrorEvent; }
 
     private void startUdpSocket() {
         if (isRunning) {
@@ -123,23 +107,18 @@ public class UdpViewModel extends AndroidViewModel {
                 NetworkViewModel networkViewModel =
                         new ViewModelProvider.AndroidViewModelFactory(app).create(NetworkViewModel.class);
 
-                // Попробуем получить IP через ViewModel
-                String usbIp = networkViewModel.getRawDeviceIpAddress().getValue();
+                String ip = networkViewModel.getRawDeviceIpAddress().getValue();
+                if (ip == null || ip.isEmpty()) ip = findEthernetOrUsbIp();
 
-                // Если не нашли — ищем все возможные USB интерфейсы, включая slave
-                if (usbIp == null || usbIp.isEmpty()) {
-                    usbIp = findUsbInterfaceIp();
-                }
-
-                if (usbIp == null) {
-                    log("UDP: USB интерфейс не найден. Wi-Fi отключён, запуск отменён.");
+                if (ip == null) {
+                    log("UDP: Ни USB, ни Ethernet интерфейсы не найдены. Wi-Fi запрещён, запуск отменён.");
                     return;
                 }
 
-                InetAddress bindAddress = InetAddress.getByName(usbIp);
+                InetAddress bindAddress = InetAddress.getByName(ip);
                 socket = new DatagramSocket(LISTEN_PORT, bindAddress);
                 socket.setBroadcast(true);
-                log("UDP: Socket создан и привязан к USB IP: " + usbIp + " (порт " + LISTEN_PORT + ")");
+                log("UDP: Socket создан и привязан к IP: " + ip + " (порт " + LISTEN_PORT + ")");
 
                 byte[] buffer = new byte[65507];
 
@@ -156,18 +135,14 @@ public class UdpViewModel extends AndroidViewModel {
 
                         log("UDP: RX " + length + " bytes от " + senderIp + " (тип 0x" + String.format("%02X", messageType) + ")");
 
-                        switch (messageType) {
-                            case MESSAGE_TYPE_HANDSHAKE:
-                                log("UDP: Получен Handshake от " + senderIp);
-                                discoveredIpEvent.postValue(senderIp);
-                                handshakeEvent.postValue(senderIp);
-                                byte[] response = "USB соединение установлено!".getBytes(StandardCharsets.UTF_8);
-                                sendData(senderIp, MESSAGE_TYPE_TEXT, response);
-                                break;
-
-                            default:
-                                receivedMessage.postValue(new UdpMessage(messageType, payload, senderIp));
-                                break;
+                        if (messageType == MESSAGE_TYPE_HANDSHAKE) {
+                            log("UDP: Получен Handshake от " + senderIp);
+                            discoveredIpEvent.postValue(senderIp);
+                            handshakeEvent.postValue(senderIp);
+                            byte[] response = "Ethernet/USB соединение установлено!".getBytes(StandardCharsets.UTF_8);
+                            sendData(senderIp, MESSAGE_TYPE_TEXT, response);
+                        } else {
+                            receivedMessage.postValue(new UdpMessage(messageType, payload, senderIp));
                         }
                     }
                 }
@@ -180,47 +155,62 @@ public class UdpViewModel extends AndroidViewModel {
         });
     }
 
-    /**
-     * Расширенный поиск IP для USB-интерфейсов, включая slave режим.
-     */
-    private String findUsbInterfaceIp() {
+    private String findEthernetOrUsbIp() {
         try {
             for (NetworkInterface intf : Collections.list(NetworkInterface.getNetworkInterfaces())) {
                 String name = intf.getName().toLowerCase();
-                if (name.contains("rndis") || name.contains("usb")) {
+
+                // Высший приоритет — Ethernet (eth0)
+                if (name.equals("eth0")) {
                     for (InetAddress addr : Collections.list(intf.getInetAddresses())) {
                         if (!addr.isLoopbackAddress() && addr instanceof java.net.Inet4Address) {
                             String ip = addr.getHostAddress();
-                            log("UDP: найден USB интерфейс: " + name + " → " + ip);
+                            log("UDP: выбран приоритетный интерфейс eth0 → " + ip);
+                            return ip;
+                        }
+                    }
+                }
+            }
+
+            // Если eth0 нет — fallback на USB/rnnet
+            for (NetworkInterface intf : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                String name = intf.getName().toLowerCase();
+                if (name.contains("wlan") || name.contains("wifi") || name.contains("p2p") || name.contains("radio")) continue;
+                if (name.contains("rndis") || name.contains("usb") || name.contains("rnnet")) {
+                    for (InetAddress addr : Collections.list(intf.getInetAddresses())) {
+                        if (!addr.isLoopbackAddress() && addr instanceof java.net.Inet4Address) {
+                            String ip = addr.getHostAddress();
+                            log("UDP: fallback интерфейс: " + name + " → " + ip);
                             return ip;
                         }
                     }
                 }
             }
         } catch (SocketException e) {
-            log("UDP: Ошибка при поиске USB интерфейса", e);
+            log("UDP: Ошибка при поиске интерфейса", e);
         }
         return null;
     }
 
+
     private void logUsbDevices() {
         executorService.execute(() -> {
             try {
-                log("USB DEVICES: Проверка интерфейсов...");
+                log("DEVICES: Проверка сетевых интерфейсов...");
                 Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
                 for (NetworkInterface intf : Collections.list(interfaces)) {
                     String name = intf.getName().toLowerCase();
-                    if (name.contains("rndis") || name.contains("usb")) {
+                    if (name.contains("rndis") || name.contains("usb") || name.contains("eth") || name.contains("rnnet")) {
                         for (InetAddress addr : Collections.list(intf.getInetAddresses())) {
                             if (!addr.isLoopbackAddress() && addr instanceof java.net.Inet4Address) {
-                                log("USB DEVICES: " + intf.getName() + " → " + addr.getHostAddress());
+                                log("DEVICES: " + intf.getName() + " → " + addr.getHostAddress());
                             }
                         }
                     }
                 }
-                log("USB DEVICES: Проверка завершена.");
+                log("DEVICES: Проверка завершена.");
             } catch (Exception e) {
-                log("USB DEVICES: Ошибка при перечислении", e);
+                log("DEVICES: Ошибка при перечислении", e);
             }
         });
     }
@@ -229,7 +219,7 @@ public class UdpViewModel extends AndroidViewModel {
         executorService.execute(() -> {
             try {
                 if (socket == null || socket.isClosed()) {
-                    log("ERROR: Socket недоступен (USB only)."); // ← вызов события ошибки
+                    log("ERROR: Socket недоступен (Ethernet/USB only).");
                     return;
                 }
 
@@ -259,7 +249,7 @@ public class UdpViewModel extends AndroidViewModel {
         if (socket != null && !socket.isClosed()) {
             socket.close();
             socket = null;
-            log("UDP: Socket закрыт (USB only).");
+            log("UDP: Socket закрыт (Ethernet/USB only).");
         }
     }
 
@@ -270,7 +260,7 @@ public class UdpViewModel extends AndroidViewModel {
         closeSocket();
         if (!executorService.isShutdown()) {
             executorService.shutdown();
-            log("UDP: Executor завершён (USB only).");
+            log("UDP: Executor завершён (Ethernet/USB only).");
         }
     }
 }
