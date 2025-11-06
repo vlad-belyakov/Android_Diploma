@@ -123,7 +123,10 @@ public class UdpViewModel extends AndroidViewModel {
                 NetworkViewModel networkViewModel =
                         new ViewModelProvider.AndroidViewModelFactory(app).create(NetworkViewModel.class);
 
+                // Попробуем получить IP через ViewModel
                 String usbIp = networkViewModel.getRawDeviceIpAddress().getValue();
+
+                // Если не нашли — ищем все возможные USB интерфейсы, включая slave
                 if (usbIp == null || usbIp.isEmpty()) {
                     usbIp = findUsbInterfaceIp();
                 }
@@ -177,6 +180,9 @@ public class UdpViewModel extends AndroidViewModel {
         });
     }
 
+    /**
+     * Расширенный поиск IP для USB-интерфейсов, включая slave режим.
+     */
     private String findUsbInterfaceIp() {
         try {
             for (NetworkInterface intf : Collections.list(NetworkInterface.getNetworkInterfaces())) {
