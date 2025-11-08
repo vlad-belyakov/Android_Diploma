@@ -60,11 +60,11 @@ public class NetworkViewModel extends AndroidViewModel {
 
             if (caps != null && props != null && props.getInterfaceName() != null) {
                 String iface = props.getInterfaceName();
-                if (iface.contains("rndis") || iface.contains("usb") || iface.contains("eth") || iface.contains("rnnet")) {
-                    usbNetwork = network;
-                    log("Net: Found interface: " + iface + " [USB/Ethernet]");
-                    return;
-                }
+                 if (iface.contains("rndis") || iface.contains("usb") || iface.contains("eth") || iface.contains("rnnet")) {
+                     usbNetwork = network;
+                     log("Net: Found interface: " + iface + " [USB/Ethernet]");
+                     return;
+                 }
             }
         }
 
@@ -82,11 +82,11 @@ public class NetworkViewModel extends AndroidViewModel {
                 for (NetworkInterface intf : Collections.list(interfaces)) {
                     String name = intf.getName();
 
-                    // 🔒 Wi-Fi интерфейсы игнорируем
-                    if (name.contains("wlan") || name.contains("wifi") || name.contains("p2p") || name.contains("radio")) {
-                        log("Net: Skipped Wi-Fi interface: " + name);
-                        continue;
-                    }
+                     // 🔒 Wi-Fi интерфейсы игнорируем
+                     if (name.contains("wlan") || name.contains("wifi") || name.contains("p2p") || name.contains("radio")) {
+                         log("Net: Skipped Wi-Fi interface: " + name);
+                         continue;
+                     }
 
                     for (InetAddress addr : Collections.list(intf.getInetAddresses())) {
                         if (!addr.isLoopbackAddress() && addr instanceof Inet4Address) {

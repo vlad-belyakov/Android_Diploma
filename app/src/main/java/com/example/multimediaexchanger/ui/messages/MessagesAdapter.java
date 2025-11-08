@@ -7,7 +7,6 @@ import android.view.ViewGroup;
 
 import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.RecyclerView;
-import androidx.viewbinding.ViewBinding;
 
 import com.bumptech.glide.Glide;
 import com.example.multimediaexchanger.R;
@@ -36,8 +35,6 @@ public class MessagesAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolde
     public void updateMessages(List<Message> newMessages) {
         if (newMessages == null) return;
         this.messageList = newMessages;
-        // It's better to use DiffUtil for more efficient updates,
-        // but for simplicity, we'll use notifyDataSetChanged for now.
         notifyDataSetChanged();
     }
 
@@ -49,7 +46,7 @@ public class MessagesAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolde
             case TEXT_RECEIVED: return VIEW_TYPE_TEXT_RECEIVED;
             case IMAGE_SENT: return VIEW_TYPE_IMAGE_SENT;
             case IMAGE_RECEIVED: return VIEW_TYPE_IMAGE_RECEIVED;
-            default: return -1; // Should not happen
+            default: return -1;
         }
     }
 
@@ -94,7 +91,6 @@ public class MessagesAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolde
         return messageList.size();
     }
 
-    // ViewHolder for sent text messages
     private static class TextSentViewHolder extends RecyclerView.ViewHolder {
         private final ItemMessageSentBinding binding;
         TextSentViewHolder(ItemMessageSentBinding binding) {
@@ -106,7 +102,6 @@ public class MessagesAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolde
         }
     }
 
-    // ViewHolder for received text messages
     private static class TextReceivedViewHolder extends RecyclerView.ViewHolder {
         private final ItemMessageReceivedBinding binding;
         TextReceivedViewHolder(ItemMessageReceivedBinding binding) {
@@ -118,7 +113,6 @@ public class MessagesAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolde
         }
     }
 
-    // ViewHolder for sent images
     private class ImageSentViewHolder extends RecyclerView.ViewHolder {
         private final ItemImageSentBinding binding;
         ImageSentViewHolder(ItemImageSentBinding binding) {
@@ -126,14 +120,14 @@ public class MessagesAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolde
             this.binding = binding;
         }
         void bind(Message message) {
+            // Новый безопасный bind без error(), чтобы видеть реально файл
             Glide.with(context)
-                 .load(message.getImageUri())
-                 .error(R.drawable.ic_broken_image)
-                 .into(binding.imageView);
+                    .load(message.getImageUri())
+                    .placeholder(R.drawable.ic_broken_image)
+                    .into(binding.imageView);
         }
     }
 
-    // ViewHolder for received images
     private class ImageReceivedViewHolder extends RecyclerView.ViewHolder {
         private final ItemImageReceivedBinding binding;
         ImageReceivedViewHolder(ItemImageReceivedBinding binding) {
@@ -142,9 +136,9 @@ public class MessagesAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolde
         }
         void bind(Message message) {
             Glide.with(context)
-                 .load(message.getImageUri())
-                 .error(R.drawable.ic_broken_image)
-                 .into(binding.imageView);
+                    .load(message.getImageUri())
+                    .placeholder(R.drawable.ic_broken_image)
+                    .into(binding.imageView);
         }
     }
 }

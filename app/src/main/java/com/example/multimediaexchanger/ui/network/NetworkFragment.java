@@ -96,15 +96,15 @@ public class NetworkFragment extends Fragment {
         binding.copyLogsButton.setOnClickListener(v -> {
             String allLogs = logTextView.getText().toString();
             String[] lines = allLogs.split("\n");
-            int start = Math.max(0, lines.length - 100);
+            int start = Math.max(0, lines.length - 200);
             StringBuilder last100Lines = new StringBuilder();
             for (int i = start; i < lines.length; i++) {
                 last100Lines.append(lines[i]).append("\n");
             }
             ClipboardManager clipboard = (ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
-            ClipData clip = ClipData.newPlainText("Last 100 Logs", last100Lines.toString());
+            ClipData clip = ClipData.newPlainText("Last 200 Logs", last100Lines.toString());
             clipboard.setPrimaryClip(clip);
-            Toast.makeText(getContext(), "Последние 100 строк логов скопированы", Toast.LENGTH_SHORT).show();
+            Toast.makeText(getContext(), "Последние 200 строк логов скопированы", Toast.LENGTH_SHORT).show();
         });
 
         binding.clearLogsButton.setOnClickListener(v -> {
