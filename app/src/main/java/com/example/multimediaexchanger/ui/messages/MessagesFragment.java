@@ -192,7 +192,7 @@ public class MessagesFragment extends Fragment {
                             udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_FILE_CHUNK, chunkBuffer.array());
 
                             // Ждём ACK 300 мс
-                            Thread.sleep(300);
+                            Thread.sleep(100);
                             ackReceived = udpViewModel.isAckReceived(currentIndex);
                         }
 

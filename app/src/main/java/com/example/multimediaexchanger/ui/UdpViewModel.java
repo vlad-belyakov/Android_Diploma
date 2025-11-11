@@ -43,6 +43,8 @@ public class UdpViewModel extends AndroidViewModel {
     private final MutableLiveData<String> handshakeEvent = new MutableLiveData<>();
     private final MutableLiveData<String> socketErrorEvent = new MutableLiveData<>();
 
+    private static final String BROADCAST_ADDRESS = "255.255.255.255";
+
     private UsbLogViewModel logger;
 
     private DatagramSocket socket;
@@ -57,7 +59,7 @@ public class UdpViewModel extends AndroidViewModel {
     public static final byte MESSAGE_TYPE_FILE_END = 0x04;
 
     public static final byte MESSAGE_TYPE_FILE_ACK = 0x05;
-
+    public static final byte MESSAGE_TYPE_DISCOVERY = 0x0A;
     public static final byte MESSAGE_TYPE_HANDSHAKE = 0x0B;
     public static final byte MESSAGE_TYPE_CALL_REQUEST = 0x10;
     public static final byte MESSAGE_TYPE_CALL_ACCEPT = 0x11;
@@ -83,7 +85,7 @@ public class UdpViewModel extends AndroidViewModel {
 
     public void setLogger(UsbLogViewModel logger) {
         this.logger = logger;
-        logUsbDevices();
+        //logUsbDevices();
         startUdpSocket();
     }
 
@@ -115,6 +117,7 @@ public class UdpViewModel extends AndroidViewModel {
         return audioQueue.poll();
     }
 
+    public boolean isBroadcastOn = true;
     private void startUdpSocket() {
         if (isRunning) {
             log("UDP: Socket listener уже запущен.");
@@ -128,6 +131,22 @@ public class UdpViewModel extends AndroidViewModel {
                 socket = new DatagramSocket(LISTEN_PORT, bindAddress);
                 socket.setBroadcast(true);
                 log("UDP: Socket создан и привязан к IP: " + bindAddress.getHostAddress() + " (порт " + LISTEN_PORT + ")");
+
+                // Запускаем отдельную задачу для периодической отправки broadcast-пакетов
+                executorService.submit(() -> {
+                    while (isBroadcastOn) {
+                        try {
+                            log("UDP: Отправка broadcast-пакета для обнаружения");
+                            sendDiscoveryBroadcast();
+                            Thread.sleep(3000);
+                        } catch (InterruptedException e) {
+                            log("UDP: Поток broadcast-отправки прерван.");
+                            Thread.currentThread().interrupt(); // Восстанавливаем флаг прерывания
+                            break;
+                        }
+                    }
+                });
+
 
                 byte[] buffer = new byte[65507];
 
@@ -146,12 +165,19 @@ public class UdpViewModel extends AndroidViewModel {
                                 " (тип 0x" + String.format("%02X", messageType) + ")");
 
                         switch (messageType) {
+
+                            case MESSAGE_TYPE_DISCOVERY:
+                                log("UDP: Обнаружен собеседник " + senderIp);
+                                discoveredIpEvent.postValue(senderIp);
+                                break; // <-- Важно!
+
                             case MESSAGE_TYPE_HANDSHAKE:
                                 log("UDP: Получен Handshake от " + senderIp);
                                 discoveredIpEvent.postValue(senderIp);
                                 handshakeEvent.postValue(senderIp);
                                 sendData(senderIp, MESSAGE_TYPE_TEXT,
                                         "Ethernet/USB соединение установлено".getBytes(StandardCharsets.UTF_8));
+                                isBroadcastOn = false;
                                 break;
 
                             case MESSAGE_TYPE_FILE_ACK:
@@ -212,7 +238,7 @@ public class UdpViewModel extends AndroidViewModel {
         return "0.0.0.0";
     }
 
-    private void logUsbDevices() {
+    /*private void logUsbDevices() {
         executorService.execute(() -> {
             try {
                 log("DEVICES: Проверка сетевых интерфейсов...");
@@ -232,7 +258,7 @@ public class UdpViewModel extends AndroidViewModel {
                 log("DEVICES: Ошибка при перечислении", e);
             }
         });
-    }
+    }*/
 
     public void sendData(String ipAddress, byte messageType, byte[] data) {
         executorService.execute(() -> {
@@ -262,6 +288,10 @@ public class UdpViewModel extends AndroidViewModel {
     public void sendHandshake(String ipAddress) {
         log("UDP: Отправка Handshake → " + ipAddress);
         sendData(ipAddress, MESSAGE_TYPE_HANDSHAKE, new byte[0]);
+    }
+
+    public void sendDiscoveryBroadcast() {
+        sendData(BROADCAST_ADDRESS, MESSAGE_TYPE_DISCOVERY, new byte[0]);
     }
 
     public synchronized void receiveAck(byte[] payload) {

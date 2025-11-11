@@ -45,7 +45,7 @@ public class NetworkFragment extends Fragment {
 
         networkViewModel.getDeviceIpAddress().observe(getViewLifecycleOwner(), binding.myIpAddressText::setText);
 
-        networkViewModel.getTargetIpAddress().observe(getViewLifecycleOwner(), targetIp -> {
+        /*networkViewModel.getTargetIpAddress().observe(getViewLifecycleOwner(), targetIp -> {
             if (targetIp == null || targetIp.isEmpty()) {
                 binding.connectionStatusText.setText("Нет подключения");
                 binding.connectionStatusText.setBackgroundColor(Color.parseColor("#D32F2F"));
@@ -53,12 +53,16 @@ public class NetworkFragment extends Fragment {
                 binding.connectionStatusText.setText("Подключение...");
                 binding.connectionStatusText.setBackgroundColor(Color.parseColor("#FBC02D"));
             }
-        });
+        });*/
 
         udpViewModel.getHandshakeEvent().observe(getViewLifecycleOwner(), handshakeIp -> {
             if (handshakeIp != null && !handshakeIp.isEmpty()) {
                 binding.connectionStatusText.setText("Подключено к: " + handshakeIp);
                 binding.connectionStatusText.setBackgroundColor(Color.parseColor("#388E3C"));
+                if(binding.ipAddressInput.getText().toString().isEmpty()) {
+                    binding.ipAddressInput.setText(handshakeIp);
+                    binding.connectButton.performClick();
+                }
                 Toast.makeText(getContext(), "USB соединение установлено", Toast.LENGTH_SHORT).show();
             }
         });
@@ -68,9 +72,14 @@ public class NetworkFragment extends Fragment {
             logScrollView.post(() -> logScrollView.fullScroll(View.FOCUS_DOWN));
         });
 
+        final int[] autoCount = {0};
         udpViewModel.getDiscoveredIpEvent().observe(getViewLifecycleOwner(), discoveredIp -> {
             if (discoveredIp != null && !discoveredIp.equals(networkViewModel.getRawDeviceIpAddress().getValue())) {
                 usbLogViewModel.log("Net: Peer discovered at " + discoveredIp + ". You can connect manually.");
+                if(autoCount[0] != 1) {
+                    udpViewModel.sendHandshake(discoveredIp);
+                    autoCount[0]++;
+                }
             }
         });
 
@@ -85,6 +94,8 @@ public class NetworkFragment extends Fragment {
         binding.connectButton.setOnClickListener(v -> {
             String ip = binding.ipAddressInput.getText().toString();
             if (!ip.isEmpty() && ip.contains(".")) {
+                binding.connectionStatusText.setText("Подключение...");
+                binding.connectionStatusText.setBackgroundColor(Color.parseColor("#FBC02D"));
                 networkViewModel.setTargetIpAddress(ip);
                 udpViewModel.sendHandshake(ip);
                 Toast.makeText(getContext(), "Запрос на подключение отправлен!", Toast.LENGTH_SHORT).show();
