@@ -12,6 +12,7 @@ import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.SeekBar;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -41,7 +42,7 @@ public class CallsFragment extends Fragment {
 
     private enum CallState { IDLE, OUTGOING, INCOMING, IN_CALL }
     private volatile CallState currentCallState = CallState.IDLE;
-
+    private volatile double currentGainFactor = 2.0;
     private final ExecutorService callExecutor = Executors.newCachedThreadPool();
 
     // PCM params (stereo, 44.1kHz, 16-bit)
@@ -87,9 +88,30 @@ public class CallsFragment extends Fragment {
         usbLogViewModel = new ViewModelProvider(requireActivity()).get(UsbLogViewModel.class);
 
         setupClickListeners();
+        setupVolumeControl();
         checkPermissions();
         observeUdpMessages();
         updateUiForState(CallState.IDLE);
+    }
+
+    private void setupVolumeControl() {
+        binding.volumeSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                if (fromUser) {
+                    // Преобразуем значение от 0-500 в коэффициент от 0.0 до 5.0
+                    currentGainFactor = progress / 100.0;
+                    // Можно добавить лог для отладки
+                    usbLogViewModel.log("Volume changed to: " + currentGainFactor);
+                }
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
     }
 
     private void setupClickListeners() {
@@ -105,6 +127,8 @@ public class CallsFragment extends Fragment {
                 switch (message.type) {
                     case UdpViewModel.MESSAGE_TYPE_CALL_REQUEST:
                         if (currentCallState == CallState.IDLE) {
+                            networkViewModel.setTargetIpAddress(message.senderIp);
+
                             usbLogViewModel.log("Call: incoming CALL_REQUEST from " + message.senderIp);
                             updateUiForState(CallState.INCOMING);
                         } else {
@@ -187,8 +211,15 @@ public class CallsFragment extends Fragment {
     }
 
     private void updateUiForState(CallState state) {
+        networkViewModel.setInCall(state == CallState.IN_CALL || state == CallState.OUTGOING || state == CallState.INCOMING);
+
         this.currentCallState = state;
         requireActivity().runOnUiThread(() -> {
+
+            boolean showVolumeControl = (state == CallState.IN_CALL);
+            binding.volumeSeekBar.setVisibility(showVolumeControl ? View.VISIBLE : View.GONE);
+            binding.volumeLabel.setVisibility(showVolumeControl ? View.VISIBLE : View.GONE);
+
             switch (state) {
                 case IDLE:
                     binding.callStatusText.setText("Готов к звонку");
@@ -229,15 +260,17 @@ public class CallsFragment extends Fragment {
                 int minIn = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN_CONFIG, AUDIO_FORMAT);
                 int minOut = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT_CONFIG, AUDIO_FORMAT);
 
-                int captureBuffer = minIn * 4;
-                int playBuffer = minOut * 4;
+                int captureBuffer = minIn * 2; // Уменьшим буфер для меньшей задержки
+                int playBuffer = minOut * 2;   // Уменьшим буфер для меньшей задержки
 
+                // Используем MIC как источник. Платформа сама применит AEC,
+                // потому что AudioTrack использует USAGE_VOICE_COMMUNICATION.
                 audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
                         CHANNEL_IN_CONFIG, AUDIO_FORMAT, captureBuffer);
 
                 audioTrack = new AudioTrack.Builder()
                         .setAudioAttributes(new AudioAttributes.Builder()
-                                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION) // Это ключ к эхоподавлению
                                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                                 .build())
                         .setAudioFormat(new AudioFormat.Builder()
@@ -253,20 +286,21 @@ public class CallsFragment extends Fragment {
 
                 captureLoopRunning = true;
                 playbackLoopRunning = true;
+                usbLogViewModel.log("Call: Audio streaming started successfully.");
 
-                // Capture loop
+                // Capture loop (Цикл захвата)
                 callExecutor.execute(() -> {
                     byte[] buffer = new byte[captureBuffer];
                     while (captureLoopRunning && isStreaming) {
                         int read = audioRecord.read(buffer, 0, buffer.length);
                         if (read > 0) {
+                            // Просто отправляем "сырые" данные как есть. Не трогаем их.
                             byte[] chunk = Arrays.copyOf(buffer, read);
-                            applySoftGain(chunk); // усиление
-                            playbackQueue.offer(chunk); // локально для прослушивания
-                            // Отправка через UDP
+
                             String targetIp = networkViewModel.getTargetIpAddress().getValue();
                             if (targetIp != null && !targetIp.isEmpty()) {
-                                final int MTU = 1400;
+                                // Отправка фрагментированных данных (ваш код здесь правильный)
+                                final int MTU = 1400; // Максимальный размер пакета
                                 int offset = 0;
                                 while (offset < chunk.length) {
                                     int len = Math.min(MTU, chunk.length - offset);
@@ -277,35 +311,55 @@ public class CallsFragment extends Fragment {
                             }
                         }
                     }
+                    usbLogViewModel.log("Call: Capture loop finished.");
                 });
 
-                // Playback loop
+                // Playback loop (Цикл воспроизведения)
                 callExecutor.execute(() -> {
                     while (playbackLoopRunning && isStreaming) {
                         byte[] frame = playbackQueue.poll();
                         if (frame != null) {
+                            // Применяем усиление к полученному звуку перед воспроизведением
+                            applySoftGain(frame);
                             audioTrack.write(frame, 0, frame.length);
                         } else {
-                            try { Thread.sleep(3); } catch (InterruptedException ignored) {}
+                            // Небольшая пауза, чтобы не загружать процессор впустую
+                            try { Thread.sleep(5); } catch (InterruptedException ignored) {}
                         }
                     }
+                    usbLogViewModel.log("Call: Playback loop finished.");
                 });
 
             } catch (Exception e) {
-                usbLogViewModel.log("ERROR: startAudioStreaming", e);
+                usbLogViewModel.log("CRITICAL ERROR: startAudioStreaming failed", e);
+                requireActivity().runOnUiThread(() -> Toast.makeText(getContext(), "Ошибка запуска аудио", Toast.LENGTH_LONG).show());
                 stopAudioStreaming();
             }
         });
     }
 
+
     private void applySoftGain(byte[] buffer) {
+        // Если усиление не требуется (коэффициент равен 1.0), выходим раньше для экономии ресурсов
+        if (Math.abs(currentGainFactor - 1.0) < 0.01) {
+            return;
+        }
+
         for (int i = 0; i < buffer.length; i += 2) {
+            // Преобразуем 2 байта (little-endian) в 16-битный signed short
             short sample = (short) ((buffer[i] & 0xFF) | (buffer[i + 1] << 8));
-            sample = (short) Math.max(Math.min(sample * 2.0, Short.MAX_VALUE), Short.MIN_VALUE);
+
+            // Применяем усиление с ограничением, чтобы избежать переполнения и "хрипов"
+            double boostedSample = sample * currentGainFactor; // <-- ИСПОЛЬЗУЕМ ПЕРЕМЕННУЮ
+            boostedSample = Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, boostedSample));
+            sample = (short) boostedSample;
+
+            // Преобразуем short обратно в 2 байта (little-endian)
             buffer[i] = (byte) (sample & 0xFF);
             buffer[i + 1] = (byte) ((sample >> 8) & 0xFF);
         }
     }
+
 
     private void stopAudioStreaming() {
         isStreaming = false;

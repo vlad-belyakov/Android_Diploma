@@ -56,6 +56,11 @@ public class NetworkFragment extends Fragment {
         });*/
 
         udpViewModel.getHandshakeEvent().observe(getViewLifecycleOwner(), handshakeIp -> {
+            Boolean inCall = networkViewModel.isInCall().getValue();
+            if (inCall != null && inCall) {
+                // Идет звонок, игнорируем Handshake
+                return;
+            }
             if (handshakeIp != null && !handshakeIp.isEmpty()) {
                 binding.connectionStatusText.setText("Подключено к: " + handshakeIp);
                 binding.connectionStatusText.setBackgroundColor(Color.parseColor("#388E3C"));
@@ -74,14 +79,21 @@ public class NetworkFragment extends Fragment {
 
         final int[] autoCount = {0};
         udpViewModel.getDiscoveredIpEvent().observe(getViewLifecycleOwner(), discoveredIp -> {
+            Boolean inCall = networkViewModel.isInCall().getValue();
+            if (inCall != null && inCall) {
+                // Идет звонок, игнорируем Handshake
+                return;
+            }
+
             if (discoveredIp != null && !discoveredIp.equals(networkViewModel.getRawDeviceIpAddress().getValue())) {
                 usbLogViewModel.log("Net: Peer discovered at " + discoveredIp + ". You can connect manually.");
-                if(autoCount[0] != 1) {
+                /*if(autoCount[0] != 1) {
                     udpViewModel.sendHandshake(discoveredIp);
                     autoCount[0]++;
-                }
+                }*/
             }
         });
+
 
         // ← новое наблюдение за ошибкой сокета
         udpViewModel.getSocketErrorEvent().observe(getViewLifecycleOwner(), error -> {

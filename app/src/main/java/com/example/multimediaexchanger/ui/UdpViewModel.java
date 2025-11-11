@@ -75,8 +75,7 @@ public class UdpViewModel extends AndroidViewModel {
     private final Application app;
     private final Set<Integer> receivedAcks = new HashSet<>();
 
-    // 🆕 Очередь для аудиокадров
-    private final Queue<byte[]> audioQueue = new ConcurrentLinkedQueue<>();
+    /*private final Queue<byte[]> audioQueue = new ConcurrentLinkedQueue<>();*/
 
     public UdpViewModel(@NonNull Application application) {
         super(application);
@@ -105,17 +104,16 @@ public class UdpViewModel extends AndroidViewModel {
     public LiveData<String> getHandshakeEvent() { return handshakeEvent; }
     public LiveData<String> getSocketErrorEvent() { return socketErrorEvent; }
 
-    // 🆕 Получение аудиопакета
-    public void onAudioPacketReceived(byte[] data) {
+
+    /*public void onAudioPacketReceived(byte[] data) {
         if (data != null && data.length > 0) {
             audioQueue.offer(data);
         }
-    }
+    }*/
 
-    // 🆕 Извлечение аудиокадра для проигрывания
-    public byte[] pollAudioFrame() {
+    /*public byte[] pollAudioFrame() {
         return audioQueue.poll();
-    }
+    }*/
 
     public boolean isBroadcastOn = true;
     private void startUdpSocket() {
@@ -133,7 +131,7 @@ public class UdpViewModel extends AndroidViewModel {
                 log("UDP: Socket создан и привязан к IP: " + bindAddress.getHostAddress() + " (порт " + LISTEN_PORT + ")");
 
                 // Запускаем отдельную задачу для периодической отправки broadcast-пакетов
-                executorService.submit(() -> {
+                /*executorService.submit(() -> {
                     while (isBroadcastOn) {
                         try {
                             log("UDP: Отправка broadcast-пакета для обнаружения");
@@ -145,7 +143,7 @@ public class UdpViewModel extends AndroidViewModel {
                             break;
                         }
                     }
-                });
+                });*/
 
 
                 byte[] buffer = new byte[65507];
@@ -161,15 +159,17 @@ public class UdpViewModel extends AndroidViewModel {
                         byte[] payload = new byte[length - 1];
                         System.arraycopy(packet.getData(), 1, payload, 0, length - 1);
 
-                        log("UDP: RX " + length + " bytes от " + senderIp +
-                                " (тип 0x" + String.format("%02X", messageType) + ")");
+                        if (messageType != MESSAGE_TYPE_CALL_AUDIO) {
+                            log("UDP: RX " + length + " bytes от " + senderIp +
+                                    " (тип 0x" + String.format("%02X", messageType) + ")");
+                        }
 
                         switch (messageType) {
 
                             case MESSAGE_TYPE_DISCOVERY:
                                 log("UDP: Обнаружен собеседник " + senderIp);
                                 discoveredIpEvent.postValue(senderIp);
-                                break; // <-- Важно!
+                                break;
 
                             case MESSAGE_TYPE_HANDSHAKE:
                                 log("UDP: Получен Handshake от " + senderIp);
@@ -182,11 +182,6 @@ public class UdpViewModel extends AndroidViewModel {
 
                             case MESSAGE_TYPE_FILE_ACK:
                                 receiveAck(payload);
-                                break;
-
-                            // 🆕 Обработка аудио
-                            case MESSAGE_TYPE_CALL_AUDIO:
-                                onAudioPacketReceived(payload);
                                 break;
 
                             default:
@@ -276,8 +271,10 @@ public class UdpViewModel extends AndroidViewModel {
                 DatagramPacket packet = new DatagramPacket(message, message.length, address, LISTEN_PORT);
                 socket.send(packet);
 
-                log("UDP: TX " + message.length + " bytes (тип 0x" +
-                        String.format("%02X", messageType) + ") → " + ipAddress);
+                if (messageType != MESSAGE_TYPE_CALL_AUDIO) {
+                    log("UDP: TX " + message.length + " bytes (тип 0x" +
+                            String.format("%02X", messageType) + ") → " + ipAddress);
+                }
 
             } catch (IOException e) {
                 log("UDP: Ошибка отправки данных", e);

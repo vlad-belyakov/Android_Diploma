@@ -41,6 +41,16 @@ public class NetworkViewModel extends AndroidViewModel {
         findDeviceIp();
     }
 
+    private final MutableLiveData<Boolean> isInCall = new MutableLiveData<>(false);
+
+    public LiveData<Boolean> isInCall() {
+        return isInCall;
+    }
+
+    public void setInCall(boolean inCall) {
+        isInCall.postValue(inCall);
+    }
+
     private void log(String msg) { if (logger != null) logger.log(msg); }
 
     public LiveData<String> getDeviceIpAddress() { return deviceIpAddress; }
