@@ -43,6 +43,37 @@
         app:layout_constraintEnd_toEndOf="parent"
         tools:visibility="visible" />
 
+
+    <TextView
+        android:id="@+id/volumeLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Громкость"
+        android:textColor="@android:color/white"
+        android:layout_marginBottom="8dp"
+        android:visibility="gone"
+        tools:visibility="visible"
+        app:layout_constraintBottom_toTopOf="@+id/volumeSeekBar"
+        app:layout_constraintStart_toStartOf="@+id/volumeSeekBar"
+        app:layout_constraintEnd_toEndOf="@+id/volumeSeekBar" />
+
+    <SeekBar
+        android:id="@+id/volumeSeekBar"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:max="500"
+        android:progress="200"
+        android:rotation="270"
+        android:visibility="gone"
+        tools:visibility="visible"
+        app:layout_constraintVertical_bias="0.5"
+        app:layout_constraintWidth_percent="0.5"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        android:layout_marginEnd="-60dp"
+        />
+
     <!-- Container for incoming call buttons -->
     <LinearLayout
         android:id="@+id/incoming_call_actions"

@@ -1,6 +1,7 @@
 package com.example.multimediaexchanger.ui;
 
 import android.app.Application;
+
 import androidx.annotation.NonNull;
 import androidx.lifecycle.AndroidViewModel;
 import androidx.lifecycle.LiveData;
@@ -10,8 +11,13 @@ import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.NetworkInterface;
 import java.net.SocketException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -30,7 +36,15 @@ public class UdpViewModel extends AndroidViewModel {
     }
 
     private final MutableLiveData<UdpMessage> receivedMessage = new MutableLiveData<>();
+
+    private final MutableLiveData<UdpMessage> callMessages = new MutableLiveData<>();
+    private final MutableLiveData<UdpMessage> streamMessages = new MutableLiveData<>();
     private final MutableLiveData<String> discoveredIpEvent = new MutableLiveData<>();
+    private final MutableLiveData<String> handshakeEvent = new MutableLiveData<>();
+    private final MutableLiveData<String> socketErrorEvent = new MutableLiveData<>();
+
+    private static final String BROADCAST_ADDRESS = "255.255.255.255";
+
     private UsbLogViewModel logger;
 
     private DatagramSocket socket;
@@ -39,115 +53,240 @@ public class UdpViewModel extends AndroidViewModel {
 
     private static final int LISTEN_PORT = 12345;
 
-    // Message Types
     public static final byte MESSAGE_TYPE_TEXT = 0x01;
     public static final byte MESSAGE_TYPE_FILE_HEADER = 0x02;
     public static final byte MESSAGE_TYPE_FILE_CHUNK = 0x03;
     public static final byte MESSAGE_TYPE_FILE_END = 0x04;
-    public static final byte MESSAGE_TYPE_HANDSHAKE = 0x0B;
 
-    // Call Signaling Message Types
+    public static final byte MESSAGE_TYPE_FILE_ACK = 0x05;
+    public static final byte MESSAGE_TYPE_DISCOVERY = 0x0A;
+    public static final byte MESSAGE_TYPE_HANDSHAKE = 0x0B;
     public static final byte MESSAGE_TYPE_CALL_REQUEST = 0x10;
     public static final byte MESSAGE_TYPE_CALL_ACCEPT = 0x11;
     public static final byte MESSAGE_TYPE_CALL_REJECT = 0x12;
     public static final byte MESSAGE_TYPE_CALL_END = 0x13;
-    public static final byte MESSAGE_TYPE_CALL_AUDIO = 0x14; // Renamed from STREAM
+    public static final byte MESSAGE_TYPE_CALL_AUDIO = 0x14;
 
-    // Stream Signaling Message Types
     public static final byte MESSAGE_TYPE_STREAM_VIDEO_CONFIG = 0x20;
     public static final byte MESSAGE_TYPE_STREAM_VIDEO_DATA = 0x21;
     public static final byte MESSAGE_TYPE_STREAM_AUDIO_CONFIG = 0x22;
     public static final byte MESSAGE_TYPE_STREAM_AUDIO_DATA = 0x23;
+    public static final byte MESSAGE_TYPE_STREAM_VIDEO_CONFIG_ACK = 0x28;
+    public static final byte MESSAGE_TYPE_STREAM_AUDIO_CONFIG_ACK = 0x29;
 
+
+    private volatile boolean videoConfigAckReceived = false;
+    private volatile boolean audioConfigAckReceived = false;
+    // Храним последние конфигурационные данные для повторной отправки
+    private byte[] lastVideoConfigData;
+    private byte[] lastAudioConfigData;
+    private final Application app;
+    private final Set<Integer> receivedAcks = new HashSet<>();
+
+    /*private final Queue<byte[]> audioQueue = new ConcurrentLinkedQueue<>();*/
 
     public UdpViewModel(@NonNull Application application) {
         super(application);
+        this.app = application;
     }
 
     public void setLogger(UsbLogViewModel logger) {
         this.logger = logger;
+        //logUsbDevices();
         startUdpSocket();
     }
 
     private void log(String message) {
-        if (logger != null) {
-            logger.log(message);
+        if (logger != null) logger.log(message);
+        if (message.contains("ERROR: Socket недоступен")) {
+            socketErrorEvent.postValue("Socket недоступен");
         }
     }
 
     private void log(String message, Throwable tr) {
-        if (logger != null) {
-            logger.log(message, tr);
+        if (logger != null) logger.log(message, tr);
+    }
+
+    public LiveData<UdpMessage> getReceivedMessage() { return receivedMessage; }
+    public LiveData<String> getDiscoveredIpEvent() { return discoveredIpEvent; }
+    public LiveData<String> getHandshakeEvent() { return handshakeEvent; }
+    public LiveData<String> getSocketErrorEvent() { return socketErrorEvent; }
+    public LiveData<UdpMessage> getCallMessages() { return callMessages; }
+    public LiveData<UdpMessage> getStreamMessages() { return streamMessages; }
+
+    /*public void onAudioPacketReceived(byte[] data) {
+        if (data != null && data.length > 0) {
+            audioQueue.offer(data);
         }
-    }
+    }*/
 
-    public LiveData<UdpMessage> getReceivedMessage() {
-        return receivedMessage;
-    }
+    /*public byte[] pollAudioFrame() {
+        return audioQueue.poll();
+    }*/
 
-    public LiveData<String> getDiscoveredIpEvent() {
-        return discoveredIpEvent;
-    }
-
+    public boolean isBroadcastOn = true;
     private void startUdpSocket() {
         if (isRunning) {
-            log("UDP: Socket listener is already running.");
+            log("UDP: Socket listener уже запущен.");
             return;
         }
         isRunning = true;
 
         executorService.execute(() -> {
             try {
-                socket = new DatagramSocket(LISTEN_PORT);
+                InetAddress bindAddress = InetAddress.getByName(findEthernetOrUsbIp());
+                socket = new DatagramSocket(LISTEN_PORT, bindAddress);
                 socket.setBroadcast(true);
-                log("UDP: Socket created. Listening on port " + LISTEN_PORT);
+                log("UDP: Socket создан и привязан к IP: " + bindAddress.getHostAddress() + " (порт " + LISTEN_PORT + ")");
+
+                // Запускаем отдельную задачу для периодической отправки broadcast-пакетов
+                /*executorService.submit(() -> {
+                    while (isBroadcastOn) {
+                        try {
+                            log("UDP: Отправка broadcast-пакета для обнаружения");
+                            sendDiscoveryBroadcast();
+                            Thread.sleep(3000);
+                        } catch (InterruptedException e) {
+                            log("UDP: Поток broadcast-отправки прерван.");
+                            Thread.currentThread().interrupt(); // Восстанавливаем флаг прерывания
+                            break;
+                        }
+                    }
+                });*/
+
+
                 byte[] buffer = new byte[65507];
 
                 while (isRunning) {
-                    try {
-                        DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-                        socket.receive(packet);
+                    DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                    socket.receive(packet);
 
-                        String senderIp = packet.getAddress().getHostAddress();
-                        if (packet.getLength() > 0) {
-                            byte messageType = packet.getData()[0];
-                            int length = packet.getLength() - 1;
-                            byte[] payload = new byte[length];
-                            System.arraycopy(packet.getData(), 1, payload, 0, length);
+                    String senderIp = packet.getAddress().getHostAddress();
+                    int length = packet.getLength();
+                    if (length > 0) {
+                        byte messageType = packet.getData()[0];
+                        byte[] payload = new byte[length - 1];
+                        System.arraycopy(packet.getData(), 1, payload, 0, length - 1);
 
-                            log("UDP: RX: Received " + packet.getLength() + " bytes from " + senderIp + " of type " + String.format("0x%02X", messageType));
-
-                            switch(messageType){
-                                case MESSAGE_TYPE_HANDSHAKE:
-                                    log("UDP: RX: Handshake received from " + senderIp);
-                                    discoveredIpEvent.postValue(senderIp);
-                                    byte[] response = "Соединение установлено!".getBytes(StandardCharsets.UTF_8);
-                                    sendData(senderIp, MESSAGE_TYPE_TEXT, response);
-                                    break;
-                                default:
-                                    receivedMessage.postValue(new UdpMessage(messageType, payload, senderIp));
-                                    break;
-                            }
+                        if (messageType != MESSAGE_TYPE_CALL_AUDIO) {
+                            log("UDP: RX " + length + " bytes от " + senderIp +
+                                    " (тип 0x" + String.format("%02X", messageType) + ")");
                         }
-                    } catch (IOException e) {
-                        if (isRunning) log("ERROR: UDP receive error", e);
+
+                        switch (messageType) {
+
+                            case MESSAGE_TYPE_DISCOVERY:
+                                log("UDP: Обнаружен собеседник " + senderIp);
+                                discoveredIpEvent.postValue(senderIp);
+                                break;
+
+                            case MESSAGE_TYPE_HANDSHAKE:
+                                log("UDP: Получен Handshake от " + senderIp);
+                                discoveredIpEvent.postValue(senderIp);
+                                handshakeEvent.postValue(senderIp);
+                                sendData(senderIp, MESSAGE_TYPE_TEXT,
+                                        "Ethernet/USB соединение установлено".getBytes(StandardCharsets.UTF_8));
+                                isBroadcastOn = false;
+                                break;
+
+                            case MESSAGE_TYPE_FILE_ACK:
+                                receiveAck(payload);
+                                break;
+
+                            case MESSAGE_TYPE_STREAM_VIDEO_CONFIG:
+                            case MESSAGE_TYPE_STREAM_VIDEO_DATA:
+                            case MESSAGE_TYPE_STREAM_AUDIO_CONFIG:
+                            case MESSAGE_TYPE_STREAM_AUDIO_DATA:
+                                streamMessages.postValue(new UdpMessage(messageType, payload, senderIp));
+                                break;
+
+                            case MESSAGE_TYPE_CALL_REQUEST:
+                            case MESSAGE_TYPE_CALL_ACCEPT:
+                            case MESSAGE_TYPE_CALL_REJECT:
+                            case MESSAGE_TYPE_CALL_END:
+                            case MESSAGE_TYPE_CALL_AUDIO:
+                                callMessages.postValue(new UdpMessage(messageType, payload, senderIp));
+                                break;
+
+                            default:
+                                receivedMessage.postValue(new UdpMessage(messageType, payload, senderIp));
+                        }
                     }
                 }
-            } catch (SocketException e) {
-                log("FATAL: UDP socket creation failed", e);
+
+            } catch (Exception e) {
+                log("UDP: Ошибка при создании сокета", e);
             } finally {
                 closeSocket();
             }
         });
     }
 
+    private String findEthernetOrUsbIp() {
+        try {
+            for (NetworkInterface intf : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                String name = intf.getName().toLowerCase();
+
+                if (name.equals("eth0")) {
+                    for (InetAddress addr : Collections.list(intf.getInetAddresses())) {
+                        if (!addr.isLoopbackAddress() && addr instanceof java.net.Inet4Address) {
+                            String ip = addr.getHostAddress();
+                            log("UDP: выбран приоритетный интерфейс eth0 → " + ip);
+                            return ip;
+                        }
+                    }
+                }
+            }
+
+            for (NetworkInterface intf : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                String name = intf.getName().toLowerCase();
+                if (name.contains("wlan") || name.contains("wifi") || name.contains("p2p") || name.contains("radio")) continue;
+                if (name.contains("rndis") || name.contains("usb") || name.contains("rnnet")) {
+                    for (InetAddress addr : Collections.list(intf.getInetAddresses())) {
+                        if (!addr.isLoopbackAddress() && addr instanceof java.net.Inet4Address) {
+                            String ip = addr.getHostAddress();
+                            log("UDP: fallback интерфейс: " + name + " → " + ip);
+                            return ip;
+                        }
+                    }
+                }
+            }
+        } catch (SocketException e) {
+            log("UDP: Ошибка при поиске интерфейса", e);
+        }
+        return "0.0.0.0";
+    }
+
+    /*private void logUsbDevices() {
+        executorService.execute(() -> {
+            try {
+                log("DEVICES: Проверка сетевых интерфейсов...");
+                Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+                for (NetworkInterface intf : Collections.list(interfaces)) {
+                    String name = intf.getName().toLowerCase();
+                    if (name.contains("rndis") || name.contains("usb") || name.contains("eth") || name.contains("rnnet")) {
+                        for (InetAddress addr : Collections.list(intf.getInetAddresses())) {
+                            if (!addr.isLoopbackAddress() && addr instanceof java.net.Inet4Address) {
+                                log("DEVICES: " + intf.getName() + " → " + addr.getHostAddress());
+                            }
+                        }
+                    }
+                }
+                log("DEVICES: Проверка завершена.");
+            } catch (Exception e) {
+                log("DEVICES: Ошибка при перечислении", e);
+            }
+        });
+    }*/
+
     public void sendData(String ipAddress, byte messageType, byte[] data) {
         executorService.execute(() -> {
-            if (socket == null || socket.isClosed()) {
-                log("ERROR: Cannot send data, socket is not ready.");
-                return;
-            }
             try {
+                if (socket == null || socket.isClosed()) {
+                    log("ERROR: Socket недоступен (Ethernet/USB only).");
+                    return;
+                }
+
                 InetAddress address = InetAddress.getByName(ipAddress);
                 byte[] message = new byte[data.length + 1];
                 message[0] = messageType;
@@ -155,23 +294,44 @@ public class UdpViewModel extends AndroidViewModel {
 
                 DatagramPacket packet = new DatagramPacket(message, message.length, address, LISTEN_PORT);
                 socket.send(packet);
-                log("UDP: TX: Sent " + message.length + " bytes of type " + String.format("0x%02X", messageType) + " to " + ipAddress);
-            } catch (Exception e) {
-                log("ERROR: UDP send packet failed to " + ipAddress, e);
+
+                if (messageType != MESSAGE_TYPE_CALL_AUDIO) {
+                    log("UDP: TX " + message.length + " bytes (тип 0x" +
+                            String.format("%02X", messageType) + ") → " + ipAddress);
+                }
+
+            } catch (IOException e) {
+                log("UDP: Ошибка отправки данных", e);
             }
         });
     }
-    
+
     public void sendHandshake(String ipAddress) {
-        log("UDP: Queuing handshake to " + ipAddress);
+        log("UDP: Отправка Handshake → " + ipAddress);
         sendData(ipAddress, MESSAGE_TYPE_HANDSHAKE, new byte[0]);
     }
 
-    private void closeSocket(){
+    public void sendDiscoveryBroadcast() {
+        sendData(BROADCAST_ADDRESS, MESSAGE_TYPE_DISCOVERY, new byte[0]);
+    }
+
+    public synchronized void receiveAck(byte[] payload) {
+        if (payload.length >= 4) {
+            int chunkIndex = ByteBuffer.wrap(payload).getInt();
+            receivedAcks.add(chunkIndex);
+            log("UDP: Получен ACK для чанка " + chunkIndex);
+        }
+    }
+
+    public synchronized boolean isAckReceived(int chunkIndex) {
+        return receivedAcks.contains(chunkIndex);
+    }
+
+    private void closeSocket() {
         if (socket != null && !socket.isClosed()) {
             socket.close();
             socket = null;
-            log("UDP: Socket closed.");
+            log("UDP: Socket закрыт (Ethernet/USB only).");
         }
     }
 
@@ -179,10 +339,10 @@ public class UdpViewModel extends AndroidViewModel {
     protected void onCleared() {
         super.onCleared();
         isRunning = false;
-        closeSocket(); 
-        if (executorService != null && !executorService.isShutdown()) {
+        closeSocket();
+        if (!executorService.isShutdown()) {
             executorService.shutdown();
-            log("UDP: Executor service shut down.");
+            log("UDP: Executor завершён (Ethernet/USB only).");
         }
     }
 }
