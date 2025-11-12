@@ -28,10 +28,14 @@ import com.example.multimediaexchanger.ui.UdpViewModel;
 import com.example.multimediaexchanger.ui.UsbLogViewModel;
 import com.example.multimediaexchanger.ui.network.NetworkViewModel;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 public class CallsFragment extends Fragment {
 
@@ -43,7 +47,14 @@ public class CallsFragment extends Fragment {
     private enum CallState { IDLE, OUTGOING, INCOMING, IN_CALL }
     private volatile CallState currentCallState = CallState.IDLE;
     private volatile double currentGainFactor = 2.0;
-    private final ExecutorService callExecutor = Executors.newCachedThreadPool();
+    private ExecutorService callExecutor = Executors.newCachedThreadPool();
+
+    // Хорошее значение для начала - от 5 до 10.
+    private static final int JITTER_BUFFER_START_THRESHOLD = 8;
+
+    // Минимальное количество пакетов, которое мы стараемся поддерживать в буфере.
+    private static final int JITTER_BUFFER_MIN_THRESHOLD = 4;
+
 
     // PCM params (stereo, 44.1kHz, 16-bit)
     private static final int SAMPLE_RATE = 44100;
@@ -61,7 +72,7 @@ public class CallsFragment extends Fragment {
     private volatile boolean playbackLoopRunning = false;
 
     // queue for playback
-    private final ConcurrentLinkedQueue<byte[]> playbackQueue = new ConcurrentLinkedQueue<>();
+    private final LinkedBlockingQueue<short[]> playbackQueue = new LinkedBlockingQueue<>();
 
     private final ActivityResultLauncher<String> requestPermissionLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestPermission(), isGranted -> {
@@ -157,7 +168,12 @@ public class CallsFragment extends Fragment {
                         }
                         break;
                     case UdpViewModel.MESSAGE_TYPE_CALL_AUDIO:
-                        if (message.payload != null) playbackQueue.offer(message.payload);
+                        if (message.payload != null && message.payload.length > 0) {
+                            // Превращаем байты в short'ы ПЕРЕД добавлением в очередь
+                            short[] audioShorts = new short[message.payload.length / 2];
+                            ByteBuffer.wrap(message.payload).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(audioShorts);
+                            playbackQueue.offer(audioShorts);
+                        }
                         break;
                     default:
                         usbLogViewModel.log("Call: received message type 0x" + String.format("%02X", message.type));
@@ -250,96 +266,171 @@ public class CallsFragment extends Fragment {
         });
     }
 
+    // Добавляем SuppressLint для разрешения, так как мы его проверяем
+    // УДАЛИТЕ СТАРЫЙ МЕТОД applySoftGain, он больше не нужен.
+
     @SuppressLint("MissingPermission")
     private void startAudioStreaming() {
         if (isStreaming) return;
+
+        if (ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            usbLogViewModel.log("ERROR: startAudioStreaming called without RECORD_AUDIO permission.");
+            Toast.makeText(getContext(), "Нет разрешения на использование микрофона", Toast.LENGTH_SHORT).show();
+            updateUiForState(CallState.IDLE);
+            return;
+        }
+
         isStreaming = true;
+        callExecutor = Executors.newFixedThreadPool(2);
 
-        callExecutor.execute(() -> {
-            try {
-                int minIn = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN_CONFIG, AUDIO_FORMAT);
-                int minOut = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT_CONFIG, AUDIO_FORMAT);
+        try {
+            // --- НАЧАЛО: ФИНАЛЬНАЯ СИНХРОНИЗАЦИЯ БУФЕРОВ ---
+            // 1. Получаем минимально допустимый системой размер буфера
+            int minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN_CONFIG, AUDIO_FORMAT);
 
-                int captureBuffer = minIn * 2; // Уменьшим буфер для меньшей задержки
-                int playBuffer = minOut * 2;   // Уменьшим буфер для меньшей задержки
+            // 2. Выбираем наш рабочий размер блока. Он должен быть НЕ МЕНЬШЕ минимального.
+            //    Если minBufferSize = 1920, а мы выберем 1280, ничего не заработает.
+            //    Поэтому наш буфер должен быть либо равен minBufferSize, либо больше и кратен ему.
+            //    Самый простой и надежный вариант - просто использовать minBufferSize.
+            final int BUFFER_SIZE = minBufferSize;
 
-                // Используем MIC как источник. Платформа сама применит AEC,
-                // потому что AudioTrack использует USAGE_VOICE_COMMUNICATION.
-                audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
-                        CHANNEL_IN_CONFIG, AUDIO_FORMAT, captureBuffer);
+            // --- КОНЕЦ: ФИНАЛЬНАЯ СИНХРОНИЗАЦИЯ БУФЕРОВ ---
 
-                audioTrack = new AudioTrack.Builder()
-                        .setAudioAttributes(new AudioAttributes.Builder()
-                                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION) // Это ключ к эхоподавлению
-                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                                .build())
-                        .setAudioFormat(new AudioFormat.Builder()
-                                .setEncoding(AUDIO_FORMAT)
-                                .setSampleRate(SAMPLE_RATE)
-                                .setChannelMask(CHANNEL_OUT_CONFIG)
-                                .build())
-                        .setBufferSizeInBytes(playBuffer)
-                        .build();
+            // Создаем AudioRecord с буфером, РАВНЫМ размеру нашего блока чтения.
+            // Это заставит read() почти всегда возвращать ровно BUFFER_SIZE байт.
+            audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
+                    CHANNEL_IN_CONFIG, AUDIO_FORMAT, BUFFER_SIZE);
 
-                audioRecord.startRecording();
-                audioTrack.play();
+            // Для AudioTrack размер буфера может быть больше, это не так критично.
+            audioTrack = new AudioTrack.Builder()
+                    .setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build())
+                    .setAudioFormat(new AudioFormat.Builder()
+                            .setEncoding(AUDIO_FORMAT)
+                            .setSampleRate(SAMPLE_RATE)
+                            .setChannelMask(CHANNEL_OUT_CONFIG)
+                            .build())
+                    .setBufferSizeInBytes(BUFFER_SIZE)
+                    .build();
 
-                captureLoopRunning = true;
-                playbackLoopRunning = true;
-                usbLogViewModel.log("Call: Audio streaming started successfully.");
+            audioRecord.startRecording();
+            audioTrack.play();
+            usbLogViewModel.log("Call: Audio streaming started successfully with buffer size: " + BUFFER_SIZE);
 
-                // Capture loop (Цикл захвата)
-                callExecutor.execute(() -> {
-                    byte[] buffer = new byte[captureBuffer];
-                    while (captureLoopRunning && isStreaming) {
-                        int read = audioRecord.read(buffer, 0, buffer.length);
-                        if (read > 0) {
-                            // Просто отправляем "сырые" данные как есть. Не трогаем их.
-                            byte[] chunk = Arrays.copyOf(buffer, read);
-
-                            String targetIp = networkViewModel.getTargetIpAddress().getValue();
-                            if (targetIp != null && !targetIp.isEmpty()) {
-                                // Отправка фрагментированных данных (ваш код здесь правильный)
-                                final int MTU = 1400; // Максимальный размер пакета
-                                int offset = 0;
-                                while (offset < chunk.length) {
-                                    int len = Math.min(MTU, chunk.length - offset);
-                                    udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_CALL_AUDIO,
-                                            Arrays.copyOfRange(chunk, offset, offset + len));
-                                    offset += len;
-                                }
+            // Capture Loop
+            callExecutor.execute(() -> {
+                Thread.currentThread().setName("AudioCaptureThread");
+                byte[] buffer = new byte[BUFFER_SIZE];
+                while (isStreaming && !Thread.currentThread().isInterrupted()) {
+                    int read = audioRecord.read(buffer, 0, buffer.length);
+                    // Теперь read почти всегда будет равен BUFFER_SIZE
+                    if (read > 0) {
+                        String targetIp = networkViewModel.getTargetIpAddress().getValue();
+                        if (targetIp != null && !targetIp.isEmpty()) {
+                            // Если прочитали меньше, чем ожидали, отправляем урезанный пакет.
+                            // Главное - не терять данные.
+                            if (read < BUFFER_SIZE) {
+                                byte[] smallerChunk = Arrays.copyOf(buffer, read);
+                                udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_CALL_AUDIO, smallerChunk);
+                            } else {
+                                udpViewModel.sendData(targetIp, UdpViewModel.MESSAGE_TYPE_CALL_AUDIO, buffer);
                             }
                         }
+                    } else if (read < 0) {
+                        usbLogViewModel.log("ERROR: AudioRecord read failed with code: " + read);
                     }
-                    usbLogViewModel.log("Call: Capture loop finished.");
-                });
+                }
+                usbLogViewModel.log("Call: Capture loop finished.");
+            });
 
-                // Playback loop (Цикл воспроизведения)
-                callExecutor.execute(() -> {
-                    while (playbackLoopRunning && isStreaming) {
-                        byte[] frame = playbackQueue.poll();
-                        if (frame != null) {
-                            // Применяем усиление к полученному звуку перед воспроизведением
-                            applySoftGain(frame);
-                            audioTrack.write(frame, 0, frame.length);
-                        } else {
-                            // Небольшая пауза, чтобы не загружать процессор впустую
-                            try { Thread.sleep(5); } catch (InterruptedException ignored) {}
+            // Playback Loop
+            callExecutor.execute(() -> {
+                Thread.currentThread().setName("AudioPlaybackThread");
+                while (isStreaming && !Thread.currentThread().isInterrupted()) {
+                    try {
+                        short[] frame = playbackQueue.take();
+                        for (int i = 0; i < frame.length; i++) {
+                            int newSample = (int) (frame[i] * currentGainFactor);
+                            frame[i] = (short) Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, newSample));
                         }
+                        audioTrack.write(frame, 0, frame.length);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    } catch (Exception e) {
+                        usbLogViewModel.log("ERROR in Playback loop", e);
                     }
-                    usbLogViewModel.log("Call: Playback loop finished.");
-                });
+                }
+                usbLogViewModel.log("Call: Playback loop finished.");
+            });
 
-            } catch (Exception e) {
-                usbLogViewModel.log("CRITICAL ERROR: startAudioStreaming failed", e);
-                requireActivity().runOnUiThread(() -> Toast.makeText(getContext(), "Ошибка запуска аудио", Toast.LENGTH_LONG).show());
-                stopAudioStreaming();
-            }
-        });
+        } catch (Exception e) {
+            usbLogViewModel.log("CRITICAL ERROR: startAudioStreaming failed", e);
+            requireActivity().runOnUiThread(() -> Toast.makeText(getContext(), "Ошибка запуска аудио", Toast.LENGTH_LONG).show());
+            stopAudioStreaming();
+        }
     }
 
 
-    private void applySoftGain(byte[] buffer) {
+
+
+
+
+
+    private void stopAudioStreaming() {
+        if (!isStreaming) return;
+        isStreaming = false;
+
+        // Это инициирует корректную остановку
+        if (callExecutor != null && !callExecutor.isShutdown()) {
+            // Мягко просим все потоки в пуле остановиться.
+            // isStreaming = false; в циклах while теперь увидят это.
+            // Также это прервет потоки, если они спят в Thread.sleep()
+            callExecutor.shutdownNow();
+
+            // Запускаем задачу ожидания в другом потоке, чтобы не блокировать UI
+            Executors.newSingleThreadExecutor().execute(() -> {
+                try {
+                    // Ждем до 2 секунд, пока потоки захвата и воспроизведения не завершатся
+                    if (!callExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
+                        usbLogViewModel.log("WARN: Audio threads did not terminate gracefully.");
+                    }
+
+                    // Теперь, когда мы уверены, что потоки остановлены, безопасно освобождаем ресурсы
+                    if (audioRecord != null) {
+                        if (audioRecord.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) {
+                            audioRecord.stop();
+                        }
+                        audioRecord.release();
+                        audioRecord = null;
+                        usbLogViewModel.log("Call: AudioRecord released.");
+                    }
+                    if (audioTrack != null) {
+                        if (audioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                            audioTrack.stop();
+                        }
+                        audioTrack.release();
+                        audioTrack = null;
+                        usbLogViewModel.log("Call: AudioTrack released.");
+                    }
+                    playbackQueue.clear();
+
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    usbLogViewModel.log("ERROR: Interrupted while waiting for audio threads to stop.", e);
+                } catch (Exception e) {
+                    usbLogViewModel.log("ERROR: stopAudioStreaming cleanup", e);
+                }
+            });
+        }
+    }
+
+
+
+
+    /*private void applySoftGain(byte[] buffer) {
         // Если усиление не требуется (коэффициент равен 1.0), выходим раньше для экономии ресурсов
         if (Math.abs(currentGainFactor - 1.0) < 0.01) {
             return;
@@ -358,32 +449,10 @@ public class CallsFragment extends Fragment {
             buffer[i] = (byte) (sample & 0xFF);
             buffer[i + 1] = (byte) ((sample >> 8) & 0xFF);
         }
-    }
+    }*/
 
 
-    private void stopAudioStreaming() {
-        isStreaming = false;
-        captureLoopRunning = false;
-        playbackLoopRunning = false;
 
-        callExecutor.execute(() -> {
-            try {
-                if (audioRecord != null) {
-                    audioRecord.stop();
-                    audioRecord.release();
-                    audioRecord = null;
-                }
-                if (audioTrack != null) {
-                    audioTrack.stop();
-                    audioTrack.release();
-                    audioTrack = null;
-                }
-                playbackQueue.clear();
-            } catch (Exception e) {
-                usbLogViewModel.log("ERROR: stopAudioStreaming cleanup", e);
-            }
-        });
-    }
 
     private void checkPermissions() {
         if (ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
