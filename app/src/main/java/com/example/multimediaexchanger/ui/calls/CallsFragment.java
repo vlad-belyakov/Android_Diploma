@@ -5,6 +5,7 @@ import android.annotation.SuppressLint;
 import android.content.pm.PackageManager;
 import android.media.AudioAttributes;
 import android.media.AudioFormat;
+import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
 import android.media.MediaRecorder;
@@ -106,24 +107,38 @@ public class CallsFragment extends Fragment {
     }
 
     private void setupVolumeControl() {
+        // --- НАЧАЛО: УВЕЛИЧЕНИЕ ДИАПАЗОНА ГРОМКОСТИ ---
+        // Устанавливаем диапазон от 0 до 800. Это даст нам коэффициент от 0.0 до 8.0
+        binding.volumeSeekBar.setMax(800);
+        // --- КОНЕЦ: УВЕЛИЧЕНИЕ ДИАПАЗОНА ГРОМКОСТИ ---
+
+        // Устанавливаем начальное значение на 1.0 (без усиления)
+        binding.volumeSeekBar.setProgress(100);
+
         binding.volumeSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                // Преобразуем значение от 0-800 в коэффициент от 0.0-8.0
+                currentGainFactor = progress / 100.0f;
+                // Логируем только если меняет пользователь, чтобы не спамить в консоль
                 if (fromUser) {
-                    // Преобразуем значение от 0-500 в коэффициент от 0.0 до 5.0
-                    currentGainFactor = progress / 100.0;
-                    // Можно добавить лог для отладки
-                    usbLogViewModel.log("Volume changed to: " + currentGainFactor);
+                    // Используем Locale.US для точки в качестве десятичного разделителя
+                    usbLogViewModel.log(String.format(java.util.Locale.US, "Volume changed to: %.2f", currentGainFactor));
                 }
             }
 
             @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {}
+            public void onStartTrackingTouch(SeekBar seekBar) {
+                // Ничего не делаем
+            }
 
             @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                // Ничего не делаем
+            }
         });
     }
+
 
     private void setupClickListeners() {
         binding.callActionButton.setOnClickListener(v -> handleCallAction());
@@ -280,6 +295,14 @@ public class CallsFragment extends Fragment {
             return;
         }
 
+        AudioManager audioManager = (AudioManager) requireContext().getSystemService(android.content.Context.AUDIO_SERVICE);
+        if (audioManager != null) {
+            // Устанавливаем громкость потока голосовых вызовов на максимум
+            int maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL);
+            audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVolume, 0);
+            usbLogViewModel.log("Call: Stream volume set to max (" + maxVolume + ")");
+        }
+
         isStreaming = true;
         callExecutor = Executors.newFixedThreadPool(2);
 
@@ -298,8 +321,10 @@ public class CallsFragment extends Fragment {
 
             // Создаем AudioRecord с буфером, РАВНЫМ размеру нашего блока чтения.
             // Это заставит read() почти всегда возвращать ровно BUFFER_SIZE байт.
-            audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
+            audioRecord = new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, SAMPLE_RATE,
                     CHANNEL_IN_CONFIG, AUDIO_FORMAT, BUFFER_SIZE);
+
+
 
             // Для AudioTrack размер буфера может быть больше, это не так критично.
             audioTrack = new AudioTrack.Builder()
