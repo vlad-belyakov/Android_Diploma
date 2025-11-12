@@ -16,11 +16,8 @@ import java.net.SocketException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
-import java.util.Enumeration;
 import java.util.HashSet;
-import java.util.Queue;
 import java.util.Set;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -39,6 +36,9 @@ public class UdpViewModel extends AndroidViewModel {
     }
 
     private final MutableLiveData<UdpMessage> receivedMessage = new MutableLiveData<>();
+
+    private final MutableLiveData<UdpMessage> callMessages = new MutableLiveData<>();
+    private final MutableLiveData<UdpMessage> streamMessages = new MutableLiveData<>();
     private final MutableLiveData<String> discoveredIpEvent = new MutableLiveData<>();
     private final MutableLiveData<String> handshakeEvent = new MutableLiveData<>();
     private final MutableLiveData<String> socketErrorEvent = new MutableLiveData<>();
@@ -71,7 +71,15 @@ public class UdpViewModel extends AndroidViewModel {
     public static final byte MESSAGE_TYPE_STREAM_VIDEO_DATA = 0x21;
     public static final byte MESSAGE_TYPE_STREAM_AUDIO_CONFIG = 0x22;
     public static final byte MESSAGE_TYPE_STREAM_AUDIO_DATA = 0x23;
+    public static final byte MESSAGE_TYPE_STREAM_VIDEO_CONFIG_ACK = 0x28;
+    public static final byte MESSAGE_TYPE_STREAM_AUDIO_CONFIG_ACK = 0x29;
 
+
+    private volatile boolean videoConfigAckReceived = false;
+    private volatile boolean audioConfigAckReceived = false;
+    // Храним последние конфигурационные данные для повторной отправки
+    private byte[] lastVideoConfigData;
+    private byte[] lastAudioConfigData;
     private final Application app;
     private final Set<Integer> receivedAcks = new HashSet<>();
 
@@ -103,7 +111,8 @@ public class UdpViewModel extends AndroidViewModel {
     public LiveData<String> getDiscoveredIpEvent() { return discoveredIpEvent; }
     public LiveData<String> getHandshakeEvent() { return handshakeEvent; }
     public LiveData<String> getSocketErrorEvent() { return socketErrorEvent; }
-
+    public LiveData<UdpMessage> getCallMessages() { return callMessages; }
+    public LiveData<UdpMessage> getStreamMessages() { return streamMessages; }
 
     /*public void onAudioPacketReceived(byte[] data) {
         if (data != null && data.length > 0) {
@@ -182,6 +191,21 @@ public class UdpViewModel extends AndroidViewModel {
 
                             case MESSAGE_TYPE_FILE_ACK:
                                 receiveAck(payload);
+                                break;
+
+                            case MESSAGE_TYPE_STREAM_VIDEO_CONFIG:
+                            case MESSAGE_TYPE_STREAM_VIDEO_DATA:
+                            case MESSAGE_TYPE_STREAM_AUDIO_CONFIG:
+                            case MESSAGE_TYPE_STREAM_AUDIO_DATA:
+                                streamMessages.postValue(new UdpMessage(messageType, payload, senderIp));
+                                break;
+
+                            case MESSAGE_TYPE_CALL_REQUEST:
+                            case MESSAGE_TYPE_CALL_ACCEPT:
+                            case MESSAGE_TYPE_CALL_REJECT:
+                            case MESSAGE_TYPE_CALL_END:
+                            case MESSAGE_TYPE_CALL_AUDIO:
+                                callMessages.postValue(new UdpMessage(messageType, payload, senderIp));
                                 break;
 
                             default:

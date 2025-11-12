@@ -147,7 +147,7 @@ public class CallsFragment extends Fragment {
     }
 
     private void observeUdpMessages() {
-        udpViewModel.getReceivedMessage().observe(getViewLifecycleOwner(), message -> {
+        udpViewModel.getCallMessages().observe(getViewLifecycleOwner(), message -> {
             if (message == null) return;
             try {
                 switch (message.type) {
